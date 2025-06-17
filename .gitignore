@@ -1,0 +1,140 @@
+# ODIN Platform .gitignore
+
+# ===========================
+# Documentation and Test Files
+# ===========================
+# Status and documentation files
+*STATUS*.md
+monitoring-status-summary.md
+EXPORTERS_FIXED_STATUS.md
+EXPORTERS_STATUS.md
+STORAGE_AND_EXPORTERS_STATUS.md
+
+# Documentation directory (except essential docs)
+docs/
+!docs/README.md
+
+# Markdown files (except essential ones)
+*.md
+!README.md
+!REQUIREMENTS.md
+!CLAUDE.md
+
+# ===========================
+# Scripts and Utilities
+# ===========================
+# Scripts directory
+scripts/
+configure-*.sh
+verify-*.sh
+install.sh
+
+# ===========================
+# Configuration Backups
+# ===========================
+# Backup files
+*.backup
+*.bak
+*.orig
+
+# ===========================
+# Temporary and Generated Files
+# ===========================
+# Temporary files
+/tmp/
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Helm values (contain sensitive configs)
+*-values.yaml
+values.yaml
+
+# Test and monitoring directories
+monitoring/
+
+# ===========================
+# Sensitive Information
+# ===========================
+# Secrets and credentials
+secrets/
+*.secret
+*.key
+*.pem
+*.crt
+
+# Environment files
+.env
+.env.*
+
+# ===========================
+# IDE and Editor Files
+# ===========================
+# VS Code
+.vscode/
+*.code-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# ===========================
+# Operating System Files
+# ===========================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ===========================
+# Kubernetes Generated Files
+# ===========================
+# Generated manifests
+*.generated.yaml
+*.generated.yml
+
+# Helm charts cache
+charts/
+
+# ===========================
+# What TO INCLUDE (Production Files)
+# ===========================
+# Core configuration files
+!k8s/
+!exporters/
+!dashboards/
+!CLAUDE.md
+!README.md
+!REQUIREMENTS.md
+
+# Essential YAML files
+!*.yaml
+!*.yml
+
+# Essential JSON files
+!*.json
+
+# ===========================
+# Final overrides for essential files
+# ===========================
+# Always include these critical files
+!CLAUDE.md
+!exporters/CLAUDE.md

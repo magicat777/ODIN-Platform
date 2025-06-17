@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-gpu-exporter-script
+  namespace: monitoring
+data:
+  nvidia_gpu_exporter.py: |
+    #!/usr/bin/env python3
+    import subprocess
+    import re
+    import time
+    from prometheus_client import start_http_server, Gauge
+    import xml.etree.ElementTree as ET
+
+    # Create Prometheus metrics
+    gpu_temp = Gauge('nvidia_gpu_temperature_celsius', 'GPU Temperature in Celsius', ['gpu', 'uuid'])
+    gpu_power = Gauge('nvidia_gpu_power_watts', 'GPU Power Draw in Watts', ['gpu', 'uuid'])
+    gpu_memory_used = Gauge('nvidia_gpu_memory_used_mb', 'GPU Memory Used in MB', ['gpu', 'uuid'])
+    gpu_memory_total = Gauge('nvidia_gpu_memory_total_mb', 'GPU Memory Total in MB', ['gpu', 'uuid'])
+    gpu_utilization = Gauge('nvidia_gpu_utilization_percent', 'GPU Utilization Percentage', ['gpu', 'uuid'])
+    gpu_fan_speed = Gauge('nvidia_gpu_fan_speed_percent', 'GPU Fan Speed Percentage', ['gpu', 'uuid'])
+    gpu_clock_sm = Gauge('nvidia_gpu_clock_sm_mhz', 'GPU SM Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_memory = Gauge('nvidia_gpu_clock_memory_mhz', 'GPU Memory Clock in MHz', ['gpu', 'uuid'])
+
+    def get_gpu_metrics():
+        try:
+            # Run nvidia-smi with XML output
+            result = subprocess.run(['nvidia-smi', '-q', '-x'], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Error running nvidia-smi: {result.stderr}")
+                return
+            
+            root = ET.fromstring(result.stdout)
+            
+            for gpu in root.findall('gpu'):
+                gpu_id = gpu.find('minor_number').text
+                uuid = gpu.find('uuid').text
+                
+                # Temperature
+                temp = gpu.find('temperature/gpu_temp').text.replace(' C', '')
+                gpu_temp.labels(gpu=gpu_id, uuid=uuid).set(float(temp))
+                
+                # Power
+                power_elem = gpu.find('gpu_power_readings/power_draw')
+                if power_elem is not None:
+                    power_draw = power_elem.text.replace(' W', '')
+                    gpu_power.labels(gpu=gpu_id, uuid=uuid).set(float(power_draw))
+                
+                # Memory
+                memory_info = gpu.find('fb_memory_usage')
+                mem_used = memory_info.find('used').text.replace(' MiB', '')
+                mem_total = memory_info.find('total').text.replace(' MiB', '')
+                gpu_memory_used.labels(gpu=gpu_id, uuid=uuid).set(float(mem_used))
+                gpu_memory_total.labels(gpu=gpu_id, uuid=uuid).set(float(mem_total))
+                
+                # Utilization
+                util_gpu = gpu.find('utilization/gpu_util').text.replace(' %', '')
+                gpu_utilization.labels(gpu=gpu_id, uuid=uuid).set(float(util_gpu))
+                
+                # Fan Speed
+                fan_elem = gpu.find('fan_speed')
+                if fan_elem is not None and fan_elem.text != 'N/A':
+                    fan = fan_elem.text.replace(' %', '')
+                    gpu_fan_speed.labels(gpu=gpu_id, uuid=uuid).set(float(fan))
+                
+                # Clocks
+                sm_clock_elem = gpu.find('clocks/sm_clock')
+                mem_clock_elem = gpu.find('clocks/mem_clock')
+                if sm_clock_elem is not None:
+                    sm_clock = sm_clock_elem.text.replace(' MHz', '')
+                    gpu_clock_sm.labels(gpu=gpu_id, uuid=uuid).set(float(sm_clock))
+                if mem_clock_elem is not None:
+                    mem_clock = mem_clock_elem.text.replace(' MHz', '')
+                    gpu_clock_memory.labels(gpu=gpu_id, uuid=uuid).set(float(mem_clock))
+                
+        except Exception as e:
+            print(f"Error collecting GPU metrics: {e}")
+
+    if __name__ == '__main__':
+        # Start HTTP server
+        start_http_server(9835)
+        print("NVIDIA GPU Exporter started on port 9835")
+        
+        # Collect metrics every 5 seconds
+        while True:
+            get_gpu_metrics()
+            time.sleep(5)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter
+  template:
+    metadata:
+      labels:
+        app: nvidia-gpu-exporter
+    spec:
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: nvidia-gpu-exporter
+        image: nvidia/cuda:12.0.0-runtime-ubuntu22.04
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update && apt-get install -y python3 python3-pip
+          pip3 install prometheus_client
+          python3 /scripts/nvidia_gpu_exporter.py
+        ports:
+        - containerPort: 9835
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: nvidia-smi
+          mountPath: /usr/bin/nvidia-smi
+          readOnly: true
+        - name: nvidia-ml
+          mountPath: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          readOnly: true
+        - name: dev
+          mountPath: /dev
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "utility"
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: nvidia-gpu-exporter-script
+          defaultMode: 0755
+      - name: nvidia-smi
+        hostPath:
+          path: /usr/bin/nvidia-smi
+          type: File
+      - name: nvidia-ml
+        hostPath:
+          path: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          type: File
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+  labels:
+    app: nvidia-gpu-exporter
+spec:
+  selector:
+    app: nvidia-gpu-exporter
+  ports:
+  - name: metrics
+    port: 9835
+    targetPort: 9835
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics

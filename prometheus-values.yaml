@@ -1,0 +1,73 @@
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-storage-2tb
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 100Gi
+    retention: 30d
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+  service:
+    type: NodePort
+    nodePort: 31493
+
+grafana:
+  adminPassword: admin
+  service:
+    type: NodePort
+    nodePort: 31494
+  persistence:
+    enabled: true
+    storageClassName: local-storage-2tb
+    size: 20Gi
+    existingClaim: grafana-pvc
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: monitoring
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-storage-2tb
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+  service:
+    type: NodePort
+    nodePort: 31496
+
+# Disable components we don't need or will configure separately
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheusOperator:
+  enabled: true
+
+# Enable serviceMonitors for k3s
+kubeApiServer:
+  enabled: true
+kubeControllerManager:
+  enabled: false  # Not exposed in k3s by default
+kubeScheduler:
+  enabled: false  # Not exposed in k3s by default
+kubeProxy:
+  enabled: false  # Not exposed in k3s by default
+kubeEtcd:
+  enabled: false  # Not exposed in k3s by default

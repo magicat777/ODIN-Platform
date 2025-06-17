@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: system-power-exporter
+  namespace: monitoring
+data:
+  power_exporter.py: |
+    #!/usr/bin/env python3
+    import os
+    import time
+    import subprocess
+    from prometheus_client import start_http_server, Gauge
+
+    # Metrics
+    cpu_power_watts = Gauge('node_cpu_power_watts', 'CPU power consumption in watts')
+    system_power_watts = Gauge('node_system_power_watts', 'Total system power consumption')
+    battery_power_watts = Gauge('node_battery_power_watts', 'Battery discharge rate in watts')
+    battery_capacity_percent = Gauge('node_battery_capacity_percent', 'Battery capacity percentage')
+    ac_adapter_online = Gauge('node_ac_adapter_online', 'AC adapter connected (1=yes, 0=no)')
+    
+    def get_battery_info():
+        """Read battery information for laptops"""
+        battery_info = {}
+        try:
+            # Check for battery in power_supply
+            power_supply_path = "/sys/class/power_supply/"
+            if os.path.exists(power_supply_path):
+                for supply in os.listdir(power_supply_path):
+                    supply_path = os.path.join(power_supply_path, supply)
+                    type_file = os.path.join(supply_path, "type")
+                    
+                    if os.path.exists(type_file):
+                        with open(type_file, 'r') as f:
+                            supply_type = f.read().strip()
+                        
+                        if supply_type == "Battery":
+                            # Get battery capacity
+                            capacity_file = os.path.join(supply_path, "capacity")
+                            if os.path.exists(capacity_file):
+                                with open(capacity_file, 'r') as f:
+                                    battery_info['capacity'] = int(f.read().strip())
+                            
+                            # Get power draw (in microwatts)
+                            power_file = os.path.join(supply_path, "power_now")
+                            if os.path.exists(power_file):
+                                with open(power_file, 'r') as f:
+                                    power_uw = int(f.read().strip())
+                                    battery_info['power_watts'] = power_uw / 1000000.0
+                            
+                        elif supply_type == "Mains":
+                            # Check if AC adapter is connected
+                            online_file = os.path.join(supply_path, "online")
+                            if os.path.exists(online_file):
+                                with open(online_file, 'r') as f:
+                                    battery_info['ac_online'] = int(f.read().strip())
+        except Exception as e:
+            print(f"Error reading battery info: {e}")
+        
+        return battery_info
+    
+    def get_rapl_power():
+        """Read CPU power from RAPL (Running Average Power Limit)"""
+        try:
+            rapl_path = "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj"
+            if os.path.exists(rapl_path):
+                with open(rapl_path, 'r') as f:
+                    energy1 = int(f.read())
+                time.sleep(1)
+                with open(rapl_path, 'r') as f:
+                    energy2 = int(f.read())
+                # Convert microjoules to watts
+                power = (energy2 - energy1) / 1000000.0
+                return power
+        except:
+            pass
+        return None
+    
+    def collect_metrics():
+        # CPU Power
+        power = get_rapl_power()
+        if power:
+            cpu_power_watts.set(power)
+        
+        # Battery information
+        battery_info = get_battery_info()
+        if 'capacity' in battery_info:
+            battery_capacity_percent.set(battery_info['capacity'])
+        
+        if 'power_watts' in battery_info:
+            battery_power_watts.set(battery_info['power_watts'])
+            # If on battery, use battery discharge rate as system power
+            if battery_info.get('ac_online', 1) == 0:
+                system_power_watts.set(battery_info['power_watts'])
+            else:
+                # On AC, estimate based on CPU power
+                if power:
+                    system_power_watts.set(power + 60 + (power * 0.3))  # CPU + base + overhead
+        
+        if 'ac_online' in battery_info:
+            ac_adapter_online.set(battery_info['ac_online'])
+    
+    if __name__ == '__main__':
+        print("Starting System Power Exporter on port 9836")
+        start_http_server(9836)
+        
+        while True:
+            collect_metrics()
+            time.sleep(5)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: system-power-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: system-power-exporter
+  template:
+    metadata:
+      labels:
+        app: system-power-exporter
+    spec:
+      hostPID: true
+      containers:
+      - name: power-exporter
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install prometheus_client
+          python /scripts/power_exporter.py
+        ports:
+        - containerPort: 9836
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: system-power-exporter
+          defaultMode: 0755
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: system-power-exporter
+  namespace: monitoring
+  labels:
+    app: system-power-exporter
+spec:
+  selector:
+    app: system-power-exporter
+  ports:
+  - name: metrics
+    port: 9836
+    targetPort: 9836
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: system-power-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: system-power-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s

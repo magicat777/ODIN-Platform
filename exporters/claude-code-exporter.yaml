@@ -1,0 +1,295 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-code-exporter
+  namespace: monitoring
+data:
+  claude_code_exporter.py: |
+    #!/usr/bin/env python3
+    import psutil
+    import time
+    import os
+    from prometheus_client import start_http_server, Gauge, Counter
+    from collections import defaultdict
+    
+    # Metrics
+    session_count = Gauge('claude_code_session_count', 'Number of active Claude Code sessions')
+    total_cpu_percent = Gauge('claude_code_total_cpu_percent', 'Total CPU usage by Claude Code processes')
+    total_memory_mb = Gauge('claude_code_total_memory_mb', 'Total memory usage by Claude Code', ['type'])
+    total_connections = Gauge('claude_code_total_connections', 'Total network connections by Claude Code')
+    
+    process_count = Gauge('claude_code_process_count', 'Number of Claude Code processes', ['type'])
+    process_cpu_percent = Gauge('claude_code_process_cpu_percent', 'CPU usage per process', ['pid', 'ppid', 'cmd', 'role'])
+    process_memory_mb = Gauge('claude_code_process_memory_mb', 'Memory usage per process', ['pid', 'ppid', 'cmd', 'role', 'type'])
+    process_threads = Gauge('claude_code_process_threads', 'Thread count per process', ['pid', 'ppid', 'cmd', 'role'])
+    process_handles = Gauge('claude_code_process_handles', 'Handle/FD count per process', ['pid', 'ppid', 'cmd', 'role'])
+    process_connections = Gauge('claude_code_process_connections', 'Network connections per process', ['pid', 'ppid', 'cmd', 'role', 'state'])
+    process_start_time = Gauge('claude_code_process_start_time', 'Process start time (epoch)', ['pid', 'ppid', 'cmd', 'role'])
+    
+    def is_claude_process(proc):
+        """Check if a process is related to Claude Code"""
+        try:
+            name = proc.name().lower()
+            
+            # Only match the actual claude executable
+            # Exclude bash commands and other processes that might mention claude
+            return name == 'claude'
+                   
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+    
+    def get_process_role(proc, claude_pids):
+        """Determine if process is parent or child"""
+        try:
+            # Claude main processes are always parent
+            if proc.name().lower() == 'claude':
+                return 'parent'
+            
+            # If its parent is a Claude process, it's a child
+            if proc.ppid() in claude_pids:
+                return 'child'
+                
+            return 'unknown'
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return 'unknown'
+    
+    def get_all_claude_processes():
+        """Get all Claude processes and their children"""
+        claude_procs = []
+        all_procs = list(psutil.process_iter(['pid', 'ppid', 'name', 'cmdline']))
+        
+        # First pass: find direct Claude processes
+        for proc in all_procs:
+            if is_claude_process(proc):
+                claude_procs.append(proc)
+        
+        # Second pass: find all children of Claude processes
+        claude_pids = [p.pid for p in claude_procs]
+        for proc in all_procs:
+            try:
+                if proc.ppid() in claude_pids and proc not in claude_procs:
+                    claude_procs.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+                
+        return claude_procs
+    
+    def get_safe_cmdline(proc):
+        """Get command line, truncated if necessary"""
+        try:
+            cmdline = ' '.join(proc.cmdline())
+            if len(cmdline) > 100:
+                cmdline = cmdline[:97] + '...'
+            return cmdline or proc.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return 'unknown'
+    
+    def collect_metrics():
+        # Find all Claude-related processes and their children
+        claude_processes = get_all_claude_processes()
+        
+        # Count sessions (actual Claude processes only)
+        sessions = set()
+        parent_count = 0
+        child_count = 0
+        standalone_count = 0
+        
+        # Only count actual Claude processes as sessions
+        for proc in claude_processes:
+            if proc.name().lower() == 'claude':
+                sessions.add(proc.pid)
+        
+        # Aggregate metrics
+        total_cpu = 0.0
+        total_mem_rss = 0.0
+        total_mem_vms = 0.0
+        total_conn = 0
+        
+        # Get list of Claude PIDs for role detection
+        claude_pids = [p.pid for p in claude_processes if p.name().lower() == 'claude']
+        
+        # Process each Claude process
+        for proc in claude_processes:
+            try:
+                pid = proc.pid
+                ppid = proc.ppid()
+                cmd = get_safe_cmdline(proc)
+                role = get_process_role(proc, claude_pids)
+                
+                # Count by role
+                if role == 'parent':
+                    parent_count += 1
+                elif role == 'child':
+                    child_count += 1
+                
+                # Get process metrics
+                with proc.oneshot():
+                    # CPU
+                    cpu_pct = proc.cpu_percent(interval=0.1)
+                    total_cpu += cpu_pct
+                    process_cpu_percent.labels(pid=pid, ppid=ppid, cmd=cmd, role=role).set(cpu_pct)
+                    
+                    # Memory
+                    mem_info = proc.memory_info()
+                    mem_rss_mb = mem_info.rss / 1024 / 1024
+                    mem_vms_mb = mem_info.vms / 1024 / 1024
+                    total_mem_rss += mem_rss_mb
+                    total_mem_vms += mem_vms_mb
+                    
+                    process_memory_mb.labels(pid=pid, ppid=ppid, cmd=cmd, role=role, type='rss').set(mem_rss_mb)
+                    process_memory_mb.labels(pid=pid, ppid=ppid, cmd=cmd, role=role, type='vms').set(mem_vms_mb)
+                    
+                    # Threads
+                    thread_count = proc.num_threads()
+                    process_threads.labels(pid=pid, ppid=ppid, cmd=cmd, role=role).set(thread_count)
+                    
+                    # File descriptors/handles
+                    try:
+                        if hasattr(proc, 'num_handles'):  # Windows
+                            handle_count = proc.num_handles()
+                        else:  # Linux/Mac
+                            handle_count = proc.num_fds()
+                        process_handles.labels(pid=pid, ppid=ppid, cmd=cmd, role=role).set(handle_count)
+                    except:
+                        pass
+                    
+                    # Network connections
+                    try:
+                        connections = proc.net_connections(kind='inet')
+                        conn_by_state = defaultdict(int)
+                        for conn in connections:
+                            state = conn.status if hasattr(conn, 'status') else 'UNKNOWN'
+                            conn_by_state[state] += 1
+                            total_conn += 1
+                        
+                        for state, count in conn_by_state.items():
+                            process_connections.labels(pid=pid, ppid=ppid, cmd=cmd, role=role, state=state).set(count)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                    
+                    # Start time
+                    start_time = proc.create_time()
+                    process_start_time.labels(pid=pid, ppid=ppid, cmd=cmd, role=role).set(start_time)
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        # Set aggregate metrics
+        session_count.set(len(sessions))
+        total_cpu_percent.set(total_cpu)
+        total_memory_mb.labels(type='rss').set(total_mem_rss)
+        total_memory_mb.labels(type='vms').set(total_mem_vms)
+        total_connections.set(total_conn)
+        
+        # Set process counts
+        process_count.labels(type='parent').set(parent_count)
+        process_count.labels(type='child').set(child_count)
+        process_count.labels(type='standalone').set(standalone_count)
+        process_count.labels(type='total').set(len(claude_processes))
+    
+    if __name__ == '__main__':
+        print("Starting Claude Code Exporter on port 9840", flush=True)
+        start_http_server(9840)
+        print("HTTP server started", flush=True)
+        
+        # Initial collection
+        try:
+            collect_metrics()
+            print("Initial metrics collection completed", flush=True)
+        except Exception as e:
+            print(f"Error in initial collection: {e}", flush=True)
+        
+        while True:
+            time.sleep(15)
+            try:
+                collect_metrics()
+            except Exception as e:
+                print(f"Error collecting metrics: {e}", flush=True)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: claude-code-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: claude-code-exporter
+  template:
+    metadata:
+      labels:
+        app: claude-code-exporter
+    spec:
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: claude-code-exporter
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install prometheus_client psutil
+          python /scripts/claude_code_exporter.py
+        ports:
+        - containerPort: 9840
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        env:
+        - name: HOST_PROC
+          value: "/host/proc"
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_PTRACE
+            - NET_ADMIN
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: claude-code-exporter
+          defaultMode: 0755
+      - name: proc
+        hostPath:
+          path: /proc
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-code-exporter
+  namespace: monitoring
+  labels:
+    app: claude-code-exporter
+spec:
+  selector:
+    app: claude-code-exporter
+  ports:
+  - name: metrics
+    port: 9840
+    targetPort: 9840
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: claude-code-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: claude-code-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics

@@ -1,0 +1,113 @@
+# StorageClass for Synology NFS
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: synology-nfs
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+# Prometheus PV on Synology
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: synology-prometheus-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: synology-nfs
+  nfs:
+    server: 192.168.1.26
+    path: "/volume1/odin-prime-storage/kubernetes/prometheus"
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=131072
+    - wsize=131072
+---
+# Loki PV on Synology
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: synology-loki-pv
+spec:
+  capacity:
+    storage: 300Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: synology-nfs
+  nfs:
+    server: 192.168.1.26
+    path: "/volume1/odin-prime-storage/kubernetes/loki"
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=131072
+    - wsize=131072
+---
+# Grafana PV on Synology
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: synology-grafana-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: synology-nfs
+  nfs:
+    server: 192.168.1.26
+    path: "/volume1/odin-prime-storage/kubernetes/grafana"
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=131072
+    - wsize=131072
+---
+# Alertmanager PV on Synology
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: synology-alertmanager-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: synology-nfs
+  nfs:
+    server: 192.168.1.26
+    path: "/volume1/odin-prime-storage/kubernetes/alertmanager"
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=131072
+    - wsize=131072
+---
+# Odin Prime PV on Synology
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: synology-odin-prime-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: synology-nfs
+  nfs:
+    server: 192.168.1.26
+    path: "/volume1/odin-prime-storage/kubernetes/odin-prime"
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+    - rsize=131072
+    - wsize=131072

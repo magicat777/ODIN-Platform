@@ -1,0 +1,90 @@
+# Base template for Python exporters with proper health checks
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: EXPORTER_NAME
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: EXPORTER_NAME
+  template:
+    metadata:
+      labels:
+        app: EXPORTER_NAME
+    spec:
+      containers:
+      - name: EXPORTER_NAME
+        # Use python:slim which includes basic utilities
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          # Install required packages
+          apt-get update && apt-get install -y --no-install-recommends \
+            procps \
+            wget \
+            && rm -rf /var/lib/apt/lists/*
+          
+          # Install Python dependencies
+          pip install --no-cache-dir prometheus_client psutil
+          
+          # Run the exporter
+          python /scripts/EXPORTER_SCRIPT.py
+        ports:
+        - containerPort: METRICS_PORT
+          name: metrics
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: METRICS_PORT
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: METRICS_PORT
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        # Startup probe for slow starting containers
+        startupProbe:
+          httpGet:
+            path: /metrics
+            port: METRICS_PORT
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: health-scripts
+          mountPath: /health
+        
+      volumes:
+      - name: scripts
+        configMap:
+          name: EXPORTER_NAME-scripts
+          defaultMode: 0755
+      - name: health-scripts
+        configMap:
+          name: health-check-scripts
+          defaultMode: 0755

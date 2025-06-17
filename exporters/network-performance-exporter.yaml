@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: network-performance-exporter
+  namespace: monitoring
+data:
+  network_exporter.py: |
+    #!/usr/bin/env python3
+    import os
+    import time
+    import psutil
+    import socket
+    from prometheus_client import start_http_server, Gauge, Counter
+
+    # Network metrics (using Gauge for simplicity, Prometheus can calculate rates)
+    net_bytes_sent = Gauge('node_network_transmit_bytes_total', 'Network bytes transmitted', ['device'])
+    net_bytes_recv = Gauge('node_network_receive_bytes_total', 'Network bytes received', ['device'])
+    net_packets_sent = Gauge('node_network_transmit_packets_total', 'Network packets transmitted', ['device'])
+    net_packets_recv = Gauge('node_network_receive_packets_total', 'Network packets received', ['device'])
+    net_errors_sent = Gauge('node_network_transmit_errs_total', 'Network transmission errors', ['device'])
+    net_errors_recv = Gauge('node_network_receive_errs_total', 'Network receive errors', ['device'])
+    net_drop_sent = Gauge('node_network_transmit_drop_total', 'Network packets dropped on transmit', ['device'])
+    net_drop_recv = Gauge('node_network_receive_drop_total', 'Network packets dropped on receive', ['device'])
+    
+    # Connection metrics
+    tcp_connections = Gauge('node_network_tcp_connections', 'TCP connections by state', ['state'])
+    udp_connections = Gauge('node_network_udp_connections', 'UDP connections')
+    
+    # Interface status
+    interface_up = Gauge('node_network_interface_up', 'Network interface status', ['device'])
+    interface_speed_mbps = Gauge('node_network_interface_speed_mbps', 'Network interface speed in Mbps', ['device'])
+    
+    # Latency metrics (to common targets)
+    ping_latency_ms = Gauge('node_network_ping_latency_ms', 'Ping latency in milliseconds', ['target'])
+    
+    def get_interface_speed(interface):
+        """Get network interface speed"""
+        try:
+            with open(f'/sys/class/net/{interface}/speed', 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0
+    
+    def ping_host(host):
+        """Simple ping to measure latency"""
+        import subprocess
+        try:
+            result = subprocess.run(['ping', '-c', '1', '-W', '1', host], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                # Parse ping output for latency
+                for line in result.stdout.split('\n'):
+                    if 'min/avg/max' in line:
+                        avg_time = float(line.split('/')[4])
+                        return avg_time
+        except:
+            pass
+        return -1
+    
+    def collect_metrics():
+        # Network interface statistics
+        net_stats = psutil.net_io_counters(pernic=True)
+        net_if_stats = psutil.net_if_stats()
+        
+        for interface, stats in net_stats.items():
+            # Skip loopback
+            if interface == 'lo':
+                continue
+                
+            # Set gauge values
+            net_bytes_sent.labels(device=interface).set(stats.bytes_sent)
+            net_bytes_recv.labels(device=interface).set(stats.bytes_recv)
+            net_packets_sent.labels(device=interface).set(stats.packets_sent)
+            net_packets_recv.labels(device=interface).set(stats.packets_recv)
+            net_errors_sent.labels(device=interface).set(stats.errout)
+            net_errors_recv.labels(device=interface).set(stats.errin)
+            net_drop_sent.labels(device=interface).set(stats.dropout)
+            net_drop_recv.labels(device=interface).set(stats.dropin)
+            
+            # Interface status
+            if interface in net_if_stats:
+                if_stat = net_if_stats[interface]
+                interface_up.labels(device=interface).set(1 if if_stat.isup else 0)
+                speed = get_interface_speed(interface)
+                if speed > 0:
+                    interface_speed_mbps.labels(device=interface).set(speed)
+        
+        # Connection statistics
+        connections = psutil.net_connections()
+        tcp_states = {}
+        udp_count = 0
+        
+        for conn in connections:
+            if conn.type == socket.SOCK_STREAM:  # TCP
+                state = conn.status
+                tcp_states[state] = tcp_states.get(state, 0) + 1
+            elif conn.type == socket.SOCK_DGRAM:  # UDP
+                udp_count += 1
+        
+        # Set TCP connection metrics
+        for state in ['ESTABLISHED', 'SYN_SENT', 'SYN_RECV', 'FIN_WAIT1', 
+                      'FIN_WAIT2', 'TIME_WAIT', 'CLOSE', 'CLOSE_WAIT', 
+                      'LAST_ACK', 'LISTEN', 'CLOSING']:
+            tcp_connections.labels(state=state).set(tcp_states.get(state, 0))
+        
+        udp_connections.set(udp_count)
+        
+        # Ping common targets
+        targets = {
+            'gateway': '192.168.1.1',
+            'dns': '8.8.8.8',
+            'synology': '192.168.1.26'
+        }
+        
+        for name, host in targets.items():
+            latency = ping_host(host)
+            if latency > 0:
+                ping_latency_ms.labels(target=name).set(latency)
+    
+    if __name__ == '__main__':
+        print("Starting Network Performance Exporter on port 9838")
+        start_http_server(9838)
+        
+        while True:
+            collect_metrics()
+            time.sleep(15)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: network-performance-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: network-performance-exporter
+  template:
+    metadata:
+      labels:
+        app: network-performance-exporter
+    spec:
+      hostNetwork: true
+      containers:
+      - name: network-exporter
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update && apt-get install -y iputils-ping
+          pip install prometheus_client psutil
+          python /scripts/network_exporter.py
+        ports:
+        - containerPort: 9838
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        securityContext:
+          capabilities:
+            add:
+            - NET_RAW
+            - NET_ADMIN
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: network-performance-exporter
+          defaultMode: 0755
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: network-performance-exporter
+  namespace: monitoring
+  labels:
+    app: network-performance-exporter
+spec:
+  selector:
+    app: network-performance-exporter
+  ports:
+  - name: metrics
+    port: 9838
+    targetPort: 9838
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: network-performance-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: network-performance-exporter
+  endpoints:
+  - port: metrics
+    interval: 30s

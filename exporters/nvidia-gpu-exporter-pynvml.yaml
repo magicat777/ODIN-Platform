@@ -1,0 +1,711 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-gpu-exporter-pynvml-script
+  namespace: monitoring
+data:
+  nvidia_gpu_exporter_pynvml.py: |
+    #!/usr/bin/env python3
+    import time
+    import logging
+    from prometheus_client import start_http_server, Gauge, Counter, Info, Histogram
+    
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        logger.info(f"NVML initialized. Driver version: {pynvml.nvmlSystemGetDriverVersion()}")
+    except Exception as e:
+        logger.error(f"Failed to initialize NVML: {e}")
+        raise
+    
+    # System-wide metrics
+    driver_version = Info('nvidia_driver_version', 'NVIDIA Driver Version')
+    nvml_version = Info('nvidia_nvml_version', 'NVML Version')
+    cuda_driver_version = Gauge('nvidia_cuda_driver_version', 'CUDA Driver Version')
+    device_count = Gauge('nvidia_device_count', 'Number of NVIDIA devices')
+    
+    # Device Information
+    gpu_info = Info('nvidia_gpu_info', 'GPU Information', ['gpu', 'uuid'])
+    
+    # Temperature Metrics
+    gpu_temperature = Gauge('nvidia_gpu_temperature_celsius', 'GPU Temperature', ['gpu', 'uuid'])
+    gpu_temperature_threshold_shutdown = Gauge('nvidia_gpu_temperature_threshold_shutdown', 'GPU Shutdown Temperature Threshold', ['gpu', 'uuid'])
+    gpu_temperature_threshold_slowdown = Gauge('nvidia_gpu_temperature_threshold_slowdown', 'GPU Slowdown Temperature Threshold', ['gpu', 'uuid'])
+    
+    # Power Metrics
+    gpu_power_usage = Gauge('nvidia_gpu_power_usage_watts', 'GPU Power Usage in Watts', ['gpu', 'uuid'])
+    gpu_power_limit = Gauge('nvidia_gpu_power_limit_watts', 'GPU Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_limit_enforced = Gauge('nvidia_gpu_power_limit_enforced_watts', 'GPU Enforced Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_limit_default = Gauge('nvidia_gpu_power_limit_default_watts', 'GPU Default Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_limit_min = Gauge('nvidia_gpu_power_limit_min_watts', 'GPU Min Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_limit_max = Gauge('nvidia_gpu_power_limit_max_watts', 'GPU Max Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_state = Gauge('nvidia_gpu_power_state', 'GPU Power State (0-12, lower is higher performance)', ['gpu', 'uuid'])
+    gpu_power_management_enabled = Gauge('nvidia_gpu_power_management_enabled', 'Power Management Enabled (1=yes, 0=no)', ['gpu', 'uuid'])
+    gpu_energy_consumption = Counter('nvidia_gpu_energy_consumption_millijoules', 'GPU Energy Consumption in millijoules', ['gpu', 'uuid'])
+    
+    # Memory Metrics
+    gpu_memory_total = Gauge('nvidia_gpu_memory_total_bytes', 'Total GPU Memory in Bytes', ['gpu', 'uuid'])
+    gpu_memory_used = Gauge('nvidia_gpu_memory_used_bytes', 'Used GPU Memory in Bytes', ['gpu', 'uuid'])
+    gpu_memory_free = Gauge('nvidia_gpu_memory_free_bytes', 'Free GPU Memory in Bytes', ['gpu', 'uuid'])
+    
+    # BAR1 Memory
+    gpu_bar1_memory_total = Gauge('nvidia_gpu_bar1_memory_total_bytes', 'Total BAR1 Memory in Bytes', ['gpu', 'uuid'])
+    gpu_bar1_memory_used = Gauge('nvidia_gpu_bar1_memory_used_bytes', 'Used BAR1 Memory in Bytes', ['gpu', 'uuid'])
+    gpu_bar1_memory_free = Gauge('nvidia_gpu_bar1_memory_free_bytes', 'Free BAR1 Memory in Bytes', ['gpu', 'uuid'])
+    
+    # Utilization Metrics
+    gpu_utilization_gpu = Gauge('nvidia_gpu_utilization_gpu_percent', 'GPU Core Utilization', ['gpu', 'uuid'])
+    gpu_utilization_memory = Gauge('nvidia_gpu_utilization_memory_percent', 'GPU Memory Utilization', ['gpu', 'uuid'])
+    gpu_utilization_encoder = Gauge('nvidia_gpu_utilization_encoder_percent', 'GPU Encoder Utilization', ['gpu', 'uuid'])
+    gpu_utilization_decoder = Gauge('nvidia_gpu_utilization_decoder_percent', 'GPU Decoder Utilization', ['gpu', 'uuid'])
+    
+    # Clock Metrics
+    gpu_clock_graphics_current = Gauge('nvidia_gpu_clock_graphics_current_mhz', 'Current Graphics Clock', ['gpu', 'uuid'])
+    gpu_clock_graphics_max = Gauge('nvidia_gpu_clock_graphics_max_mhz', 'Max Graphics Clock', ['gpu', 'uuid'])
+    gpu_clock_sm_current = Gauge('nvidia_gpu_clock_sm_current_mhz', 'Current SM Clock', ['gpu', 'uuid'])
+    gpu_clock_sm_max = Gauge('nvidia_gpu_clock_sm_max_mhz', 'Max SM Clock', ['gpu', 'uuid'])
+    gpu_clock_memory_current = Gauge('nvidia_gpu_clock_memory_current_mhz', 'Current Memory Clock', ['gpu', 'uuid'])
+    gpu_clock_memory_max = Gauge('nvidia_gpu_clock_memory_max_mhz', 'Max Memory Clock', ['gpu', 'uuid'])
+    gpu_clock_video_current = Gauge('nvidia_gpu_clock_video_current_mhz', 'Current Video Clock', ['gpu', 'uuid'])
+    gpu_clock_video_max = Gauge('nvidia_gpu_clock_video_max_mhz', 'Max Video Clock', ['gpu', 'uuid'])
+    
+    # Application Clocks
+    gpu_clock_graphics_applications = Gauge('nvidia_gpu_clock_graphics_applications_mhz', 'Application Graphics Clock', ['gpu', 'uuid'])
+    gpu_clock_memory_applications = Gauge('nvidia_gpu_clock_memory_applications_mhz', 'Application Memory Clock', ['gpu', 'uuid'])
+    
+    # Fan Speed
+    gpu_fan_speed = Gauge('nvidia_gpu_fan_speed_percent', 'GPU Fan Speed', ['gpu', 'uuid'])
+    
+    # Performance State
+    gpu_performance_state = Gauge('nvidia_gpu_performance_state', 'GPU Performance State (0-15)', ['gpu', 'uuid'])
+    
+    # Throttling Metrics
+    gpu_throttle_reasons = Gauge('nvidia_gpu_throttle_reasons', 'GPU Throttle Reasons Bitmask', ['gpu', 'uuid'])
+    gpu_current_throttle_reasons = Gauge('nvidia_gpu_current_throttle_reasons', 'GPU Current Throttle Reasons Bitmask', ['gpu', 'uuid'])
+    
+    # PCIe Metrics
+    gpu_pcie_generation_current = Gauge('nvidia_gpu_pcie_generation_current', 'Current PCIe Generation', ['gpu', 'uuid'])
+    gpu_pcie_generation_max = Gauge('nvidia_gpu_pcie_generation_max', 'Max PCIe Generation', ['gpu', 'uuid'])
+    gpu_pcie_link_width_current = Gauge('nvidia_gpu_pcie_link_width_current', 'Current PCIe Link Width', ['gpu', 'uuid'])
+    gpu_pcie_link_width_max = Gauge('nvidia_gpu_pcie_link_width_max', 'Max PCIe Link Width', ['gpu', 'uuid'])
+    gpu_pcie_throughput_tx = Gauge('nvidia_gpu_pcie_throughput_tx_kilobytes', 'PCIe TX Throughput KB/s', ['gpu', 'uuid'])
+    gpu_pcie_throughput_rx = Gauge('nvidia_gpu_pcie_throughput_rx_kilobytes', 'PCIe RX Throughput KB/s', ['gpu', 'uuid'])
+    gpu_pcie_replay_counter = Counter('nvidia_gpu_pcie_replay_counter', 'PCIe Replay Counter', ['gpu', 'uuid'])
+    
+    # ECC Metrics
+    gpu_ecc_mode_current = Gauge('nvidia_gpu_ecc_mode_current', 'Current ECC Mode (1=enabled)', ['gpu', 'uuid'])
+    gpu_ecc_mode_pending = Gauge('nvidia_gpu_ecc_mode_pending', 'Pending ECC Mode (1=enabled)', ['gpu', 'uuid'])
+    gpu_ecc_errors_volatile_single = Counter('nvidia_gpu_ecc_errors_volatile_single_bit', 'Volatile single bit ECC errors', ['gpu', 'uuid', 'memory_type'])
+    gpu_ecc_errors_volatile_double = Counter('nvidia_gpu_ecc_errors_volatile_double_bit', 'Volatile double bit ECC errors', ['gpu', 'uuid', 'memory_type'])
+    gpu_ecc_errors_aggregate_single = Counter('nvidia_gpu_ecc_errors_aggregate_single_bit', 'Aggregate single bit ECC errors', ['gpu', 'uuid', 'memory_type'])
+    gpu_ecc_errors_aggregate_double = Counter('nvidia_gpu_ecc_errors_aggregate_double_bit', 'Aggregate double bit ECC errors', ['gpu', 'uuid', 'memory_type'])
+    
+    # Retired Pages
+    gpu_retired_pages_single_bit = Counter('nvidia_gpu_retired_pages_single_bit', 'Retired pages due to single bit errors', ['gpu', 'uuid'])
+    gpu_retired_pages_double_bit = Counter('nvidia_gpu_retired_pages_double_bit', 'Retired pages due to double bit errors', ['gpu', 'uuid'])
+    gpu_retired_pages_pending = Gauge('nvidia_gpu_retired_pages_pending', 'Pages pending retirement', ['gpu', 'uuid'])
+    
+    # Process Information
+    gpu_process_count = Gauge('nvidia_gpu_process_count', 'Number of processes on GPU', ['gpu', 'uuid'])
+    gpu_process_memory = Gauge('nvidia_gpu_process_memory_bytes', 'Memory used by process', ['gpu', 'uuid', 'pid', 'process_name'])
+    
+    # Compute Mode
+    gpu_compute_mode = Gauge('nvidia_gpu_compute_mode', 'GPU Compute Mode (0=Default, 1=Exclusive Thread, 2=Prohibited, 3=Exclusive Process)', ['gpu', 'uuid'])
+    
+    # Persistence Mode
+    gpu_persistence_mode = Gauge('nvidia_gpu_persistence_mode', 'GPU Persistence Mode (1=enabled)', ['gpu', 'uuid'])
+    
+    # MIG Mode
+    gpu_mig_mode_current = Gauge('nvidia_gpu_mig_mode_current', 'Current MIG Mode', ['gpu', 'uuid'])
+    gpu_mig_mode_pending = Gauge('nvidia_gpu_mig_mode_pending', 'Pending MIG Mode', ['gpu', 'uuid'])
+    
+    # Accounting Mode
+    gpu_accounting_mode = Gauge('nvidia_gpu_accounting_mode', 'GPU Accounting Mode (1=enabled)', ['gpu', 'uuid'])
+    gpu_accounting_buffer_size = Gauge('nvidia_gpu_accounting_buffer_size', 'GPU Accounting Buffer Size', ['gpu', 'uuid'])
+    
+    # Board Information
+    gpu_board_id = Gauge('nvidia_gpu_board_id', 'GPU Board ID', ['gpu', 'uuid'])
+    gpu_multiprocessor_count = Gauge('nvidia_gpu_multiprocessor_count', 'Number of Multiprocessors', ['gpu', 'uuid'])
+    gpu_cuda_cores = Gauge('nvidia_gpu_cuda_cores', 'Number of CUDA Cores', ['gpu', 'uuid'])
+    
+    # Encoder Stats
+    gpu_encoder_sessions = Gauge('nvidia_gpu_encoder_sessions', 'Active encoder sessions', ['gpu', 'uuid'])
+    gpu_encoder_average_fps = Gauge('nvidia_gpu_encoder_average_fps', 'Encoder average FPS', ['gpu', 'uuid'])
+    gpu_encoder_average_latency = Gauge('nvidia_gpu_encoder_average_latency_us', 'Encoder average latency in microseconds', ['gpu', 'uuid'])
+    
+    # FBC Stats
+    gpu_fbc_sessions = Gauge('nvidia_gpu_fbc_sessions', 'Active FBC sessions', ['gpu', 'uuid'])
+    gpu_fbc_average_fps = Gauge('nvidia_gpu_fbc_average_fps', 'FBC average FPS', ['gpu', 'uuid'])
+    gpu_fbc_average_latency = Gauge('nvidia_gpu_fbc_average_latency_us', 'FBC average latency in microseconds', ['gpu', 'uuid'])
+    
+    # Violations (thermal, power, etc)
+    gpu_violations_power = Counter('nvidia_gpu_violations_power_total', 'Power violations', ['gpu', 'uuid'])
+    gpu_violations_thermal = Counter('nvidia_gpu_violations_thermal_total', 'Thermal violations', ['gpu', 'uuid'])
+    gpu_violations_sync_boost = Counter('nvidia_gpu_violations_sync_boost_total', 'Sync boost violations', ['gpu', 'uuid'])
+    gpu_violations_board_limit = Counter('nvidia_gpu_violations_board_limit_total', 'Board limit violations', ['gpu', 'uuid'])
+    gpu_violations_low_util = Counter('nvidia_gpu_violations_low_util_total', 'Low utilization violations', ['gpu', 'uuid'])
+    gpu_violations_reliability = Counter('nvidia_gpu_violations_reliability_total', 'Reliability violations', ['gpu', 'uuid'])
+    gpu_violations_app_clock = Counter('nvidia_gpu_violations_app_clock_total', 'App clock violations', ['gpu', 'uuid'])
+    gpu_violations_clock_throttle = Counter('nvidia_gpu_violations_clock_throttle_total', 'Clock throttle violations', ['gpu', 'uuid'])
+    
+    # Graphics and Compute Processes
+    gpu_graphics_processes = Gauge('nvidia_gpu_graphics_processes', 'Number of graphics processes', ['gpu', 'uuid'])
+    gpu_compute_processes = Gauge('nvidia_gpu_compute_processes', 'Number of compute processes', ['gpu', 'uuid'])
+    
+    def get_throttle_reason_string(reasons_bitmask):
+        """Convert throttle reasons bitmask to human-readable string"""
+        if reasons_bitmask == pynvml.nvmlClocksEventReasonNone:
+            return "None"
+        
+        reasons = []
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonGpuIdle:
+            reasons.append("GPU_Idle")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonApplicationsClocksSetting:
+            reasons.append("Applications_Clocks_Setting")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonSwPowerCap:
+            reasons.append("SW_Power_Cap")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonHwSlowdown:
+            reasons.append("HW_Slowdown")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonSyncBoost:
+            reasons.append("Sync_Boost")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonSwThermalSlowdown:
+            reasons.append("SW_Thermal_Slowdown")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonHwThermalSlowdown:
+            reasons.append("HW_Thermal_Slowdown")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonHwPowerBrakeSlowdown:
+            reasons.append("HW_Power_Brake_Slowdown")
+        if reasons_bitmask & pynvml.nvmlClocksEventReasonDisplayClockSetting:
+            reasons.append("Display_Clock_Setting")
+        
+        return ",".join(reasons) if reasons else "Unknown"
+    
+    def collect_metrics():
+        try:
+            # System-wide metrics
+            driver_version.info({'version': pynvml.nvmlSystemGetDriverVersion()})
+            nvml_version.info({'version': pynvml.nvmlSystemGetNVMLVersion()})
+            
+            cuda_version = pynvml.nvmlSystemGetCudaDriverVersion()
+            cuda_major = cuda_version // 1000
+            cuda_minor = (cuda_version % 1000) // 10
+            cuda_driver_version.set(float(f"{cuda_major}.{cuda_minor}"))
+            
+            device_count_value = pynvml.nvmlDeviceGetCount()
+            device_count.set(device_count_value)
+            
+            # Iterate through all devices
+            for i in range(device_count_value):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                name = pynvml.nvmlDeviceGetName(handle)
+                
+                # Device info
+                try:
+                    pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+                    brand = pynvml.nvmlDeviceGetBrand(handle)
+                    compute_cap = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+                    
+                    gpu_info.labels(gpu=str(i), uuid=uuid).info({
+                        'name': name,
+                        'brand': str(brand),
+                        'compute_capability': f"{compute_cap[0]}.{compute_cap[1]}",
+                        'pci_bus_id': pci_info.busId,
+                        'pci_device_id': f"{pci_info.pciDeviceId:08X}",
+                        'pci_subsystem_id': f"{pci_info.pciSubSystemId:08X}"
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to get device info for GPU {i}: {e}")
+                
+                # Temperature
+                try:
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                    gpu_temperature.labels(gpu=str(i), uuid=uuid).set(temp)
+                    
+                    shutdown_temp = pynvml.nvmlDeviceGetTemperatureThreshold(handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SHUTDOWN)
+                    gpu_temperature_threshold_shutdown.labels(gpu=str(i), uuid=uuid).set(shutdown_temp)
+                    
+                    slowdown_temp = pynvml.nvmlDeviceGetTemperatureThreshold(handle, pynvml.NVML_TEMPERATURE_THRESHOLD_SLOWDOWN)
+                    gpu_temperature_threshold_slowdown.labels(gpu=str(i), uuid=uuid).set(slowdown_temp)
+                except Exception as e:
+                    logger.warning(f"Failed to get temperature for GPU {i}: {e}")
+                
+                # Power
+                try:
+                    power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # Convert to watts
+                    gpu_power_usage.labels(gpu=str(i), uuid=uuid).set(power)
+                    
+                    power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0
+                    gpu_power_limit.labels(gpu=str(i), uuid=uuid).set(power_limit)
+                    
+                    enforced_limit = pynvml.nvmlDeviceGetEnforcedPowerLimit(handle) / 1000.0
+                    gpu_power_limit_enforced.labels(gpu=str(i), uuid=uuid).set(enforced_limit)
+                    
+                    constraints = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+                    gpu_power_limit_min.labels(gpu=str(i), uuid=uuid).set(constraints[0] / 1000.0)
+                    gpu_power_limit_max.labels(gpu=str(i), uuid=uuid).set(constraints[1] / 1000.0)
+                    
+                    default_limit = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle) / 1000.0
+                    gpu_power_limit_default.labels(gpu=str(i), uuid=uuid).set(default_limit)
+                    
+                    power_state = pynvml.nvmlDeviceGetPowerState(handle)
+                    gpu_power_state.labels(gpu=str(i), uuid=uuid).set(power_state)
+                    
+                    power_mgmt = pynvml.nvmlDeviceGetPowerManagementMode(handle)
+                    gpu_power_management_enabled.labels(gpu=str(i), uuid=uuid).set(1 if power_mgmt == pynvml.NVML_FEATURE_ENABLED else 0)
+                    
+                    # Energy consumption
+                    try:
+                        energy = pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+                        gpu_energy_consumption.labels(gpu=str(i), uuid=uuid)._value.set(energy)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get power metrics for GPU {i}: {e}")
+                
+                # Memory
+                try:
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    gpu_memory_total.labels(gpu=str(i), uuid=uuid).set(mem_info.total)
+                    gpu_memory_used.labels(gpu=str(i), uuid=uuid).set(mem_info.used)
+                    gpu_memory_free.labels(gpu=str(i), uuid=uuid).set(mem_info.free)
+                    
+                    # BAR1 Memory
+                    try:
+                        bar1_info = pynvml.nvmlDeviceGetBAR1MemoryInfo(handle)
+                        gpu_bar1_memory_total.labels(gpu=str(i), uuid=uuid).set(bar1_info.bar1Total)
+                        gpu_bar1_memory_used.labels(gpu=str(i), uuid=uuid).set(bar1_info.bar1Used)
+                        gpu_bar1_memory_free.labels(gpu=str(i), uuid=uuid).set(bar1_info.bar1Free)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get memory info for GPU {i}: {e}")
+                
+                # Utilization
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    gpu_utilization_gpu.labels(gpu=str(i), uuid=uuid).set(util.gpu)
+                    gpu_utilization_memory.labels(gpu=str(i), uuid=uuid).set(util.memory)
+                    
+                    # Encoder/Decoder utilization
+                    try:
+                        encoder_util, _ = pynvml.nvmlDeviceGetEncoderUtilization(handle)
+                        gpu_utilization_encoder.labels(gpu=str(i), uuid=uuid).set(encoder_util)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                    try:
+                        decoder_util, _ = pynvml.nvmlDeviceGetDecoderUtilization(handle)
+                        gpu_utilization_decoder.labels(gpu=str(i), uuid=uuid).set(decoder_util)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get utilization for GPU {i}: {e}")
+                
+                # Clocks
+                try:
+                    # Current clocks
+                    graphics_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)
+                    gpu_clock_graphics_current.labels(gpu=str(i), uuid=uuid).set(graphics_clock)
+                    
+                    sm_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
+                    gpu_clock_sm_current.labels(gpu=str(i), uuid=uuid).set(sm_clock)
+                    
+                    mem_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+                    gpu_clock_memory_current.labels(gpu=str(i), uuid=uuid).set(mem_clock)
+                    
+                    try:
+                        video_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_VIDEO)
+                        gpu_clock_video_current.labels(gpu=str(i), uuid=uuid).set(video_clock)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                    # Max clocks
+                    graphics_max = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)
+                    gpu_clock_graphics_max.labels(gpu=str(i), uuid=uuid).set(graphics_max)
+                    
+                    sm_max = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM)
+                    gpu_clock_sm_max.labels(gpu=str(i), uuid=uuid).set(sm_max)
+                    
+                    mem_max = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+                    gpu_clock_memory_max.labels(gpu=str(i), uuid=uuid).set(mem_max)
+                    
+                    try:
+                        video_max = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_VIDEO)
+                        gpu_clock_video_max.labels(gpu=str(i), uuid=uuid).set(video_max)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                    # Application clocks
+                    try:
+                        app_clocks = pynvml.nvmlDeviceGetApplicationsClock(handle, pynvml.NVML_CLOCK_GRAPHICS)
+                        gpu_clock_graphics_applications.labels(gpu=str(i), uuid=uuid).set(app_clocks)
+                        
+                        app_mem_clocks = pynvml.nvmlDeviceGetApplicationsClock(handle, pynvml.NVML_CLOCK_MEM)
+                        gpu_clock_memory_applications.labels(gpu=str(i), uuid=uuid).set(app_mem_clocks)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get clock info for GPU {i}: {e}")
+                
+                # Fan speed
+                try:
+                    fan = pynvml.nvmlDeviceGetFanSpeed(handle)
+                    gpu_fan_speed.labels(gpu=str(i), uuid=uuid).set(fan)
+                except Exception as e:
+                    logger.warning(f"Failed to get fan speed for GPU {i}: {e}")
+                
+                # Performance state
+                try:
+                    perf_state = pynvml.nvmlDeviceGetPerformanceState(handle)
+                    gpu_performance_state.labels(gpu=str(i), uuid=uuid).set(perf_state)
+                except Exception as e:
+                    logger.warning(f"Failed to get performance state for GPU {i}: {e}")
+                
+                # Throttle reasons
+                try:
+                    throttle_reasons = pynvml.nvmlDeviceGetCurrentClocksEventReasons(handle)
+                    gpu_current_throttle_reasons.labels(gpu=str(i), uuid=uuid).set(throttle_reasons)
+                    
+                    supported_throttle = pynvml.nvmlDeviceGetSupportedClocksEventReasons(handle)
+                    gpu_throttle_reasons.labels(gpu=str(i), uuid=uuid).set(supported_throttle)
+                except Exception as e:
+                    logger.warning(f"Failed to get throttle reasons for GPU {i}: {e}")
+                
+                # PCIe
+                try:
+                    pcie_gen = pynvml.nvmlDeviceGetCurrPcieLinkGeneration(handle)
+                    gpu_pcie_generation_current.labels(gpu=str(i), uuid=uuid).set(pcie_gen)
+                    
+                    pcie_width = pynvml.nvmlDeviceGetCurrPcieLinkWidth(handle)
+                    gpu_pcie_link_width_current.labels(gpu=str(i), uuid=uuid).set(pcie_width)
+                    
+                    max_gen = pynvml.nvmlDeviceGetMaxPcieLinkGeneration(handle)
+                    gpu_pcie_generation_max.labels(gpu=str(i), uuid=uuid).set(max_gen)
+                    
+                    max_width = pynvml.nvmlDeviceGetMaxPcieLinkWidth(handle)
+                    gpu_pcie_link_width_max.labels(gpu=str(i), uuid=uuid).set(max_width)
+                    
+                    # PCIe throughput
+                    try:
+                        tx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
+                        gpu_pcie_throughput_tx.labels(gpu=str(i), uuid=uuid).set(tx)
+                        
+                        rx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_RX_BYTES)
+                        gpu_pcie_throughput_rx.labels(gpu=str(i), uuid=uuid).set(rx)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                    # PCIe replay counter
+                    try:
+                        replay = pynvml.nvmlDeviceGetPcieReplayCounter(handle)
+                        gpu_pcie_replay_counter.labels(gpu=str(i), uuid=uuid)._value.set(replay)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get PCIe info for GPU {i}: {e}")
+                
+                # ECC
+                try:
+                    current_ecc = pynvml.nvmlDeviceGetEccMode(handle)
+                    gpu_ecc_mode_current.labels(gpu=str(i), uuid=uuid).set(1 if current_ecc.current == pynvml.NVML_FEATURE_ENABLED else 0)
+                    gpu_ecc_mode_pending.labels(gpu=str(i), uuid=uuid).set(1 if current_ecc.pending == pynvml.NVML_FEATURE_ENABLED else 0)
+                    
+                    # ECC errors
+                    memory_types = [
+                        (pynvml.NVML_MEMORY_ERROR_TYPE_CORRECTED, pynvml.NVML_VOLATILE_ECC, gpu_ecc_errors_volatile_single, 'volatile_single'),
+                        (pynvml.NVML_MEMORY_ERROR_TYPE_UNCORRECTED, pynvml.NVML_VOLATILE_ECC, gpu_ecc_errors_volatile_double, 'volatile_double'),
+                        (pynvml.NVML_MEMORY_ERROR_TYPE_CORRECTED, pynvml.NVML_AGGREGATE_ECC, gpu_ecc_errors_aggregate_single, 'aggregate_single'),
+                        (pynvml.NVML_MEMORY_ERROR_TYPE_UNCORRECTED, pynvml.NVML_AGGREGATE_ECC, gpu_ecc_errors_aggregate_double, 'aggregate_double')
+                    ]
+                    
+                    for error_type, counter_type, metric, label in memory_types:
+                        for location in [pynvml.NVML_MEMORY_LOCATION_L1_CACHE, pynvml.NVML_MEMORY_LOCATION_L2_CACHE, 
+                                       pynvml.NVML_MEMORY_LOCATION_DEVICE_MEMORY, pynvml.NVML_MEMORY_LOCATION_REGISTER_FILE]:
+                            try:
+                                count = pynvml.nvmlDeviceGetMemoryErrorCounter(handle, error_type, counter_type, location)
+                                metric.labels(gpu=str(i), uuid=uuid, memory_type=str(location))._value.set(count)
+                            except pynvml.NVMLError_NotSupported:
+                                pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get ECC info for GPU {i}: {e}")
+                
+                # Retired pages
+                try:
+                    retired_single = pynvml.nvmlDeviceGetRetiredPages(handle, pynvml.NVML_PAGE_RETIREMENT_CAUSE_MULTIPLE_SINGLE_BIT_ECC_ERRORS)
+                    gpu_retired_pages_single_bit.labels(gpu=str(i), uuid=uuid)._value.set(len(retired_single))
+                    
+                    retired_double = pynvml.nvmlDeviceGetRetiredPages(handle, pynvml.NVML_PAGE_RETIREMENT_CAUSE_DOUBLE_BIT_ECC_ERROR)
+                    gpu_retired_pages_double_bit.labels(gpu=str(i), uuid=uuid)._value.set(len(retired_double))
+                    
+                    pending = pynvml.nvmlDeviceGetRetiredPagesPendingStatus(handle)
+                    gpu_retired_pages_pending.labels(gpu=str(i), uuid=uuid).set(1 if pending == pynvml.NVML_FEATURE_ENABLED else 0)
+                except Exception as e:
+                    logger.warning(f"Failed to get retired pages info for GPU {i}: {e}")
+                
+                # Process information
+                try:
+                    compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                    graphics_procs = pynvml.nvmlDeviceGetGraphicsRunningProcesses(handle)
+                    
+                    gpu_compute_processes.labels(gpu=str(i), uuid=uuid).set(len(compute_procs))
+                    gpu_graphics_processes.labels(gpu=str(i), uuid=uuid).set(len(graphics_procs))
+                    
+                    total_procs = len(compute_procs) + len(graphics_procs)
+                    gpu_process_count.labels(gpu=str(i), uuid=uuid).set(total_procs)
+                    
+                    # Clear previous process metrics
+                    gpu_process_memory._metrics.clear()
+                    
+                    # Add current processes
+                    for proc in compute_procs + graphics_procs:
+                        try:
+                            # Get process name
+                            proc_name = pynvml.nvmlSystemGetProcessName(proc.pid)
+                            if isinstance(proc_name, bytes):
+                                proc_name = proc_name.decode('utf-8', errors='replace')
+                            proc_name = proc_name.split('/')[-1][:50]  # Limit name length
+                            
+                            gpu_process_memory.labels(
+                                gpu=str(i),
+                                uuid=uuid,
+                                pid=str(proc.pid),
+                                process_name=proc_name
+                            ).set(proc.usedGpuMemory)
+                        except Exception as e:
+                            logger.warning(f"Failed to get process name for PID {proc.pid}: {e}")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get process info for GPU {i}: {e}")
+                
+                # Other settings
+                try:
+                    # Compute mode
+                    compute_mode = pynvml.nvmlDeviceGetComputeMode(handle)
+                    gpu_compute_mode.labels(gpu=str(i), uuid=uuid).set(compute_mode)
+                    
+                    # Persistence mode
+                    persistence = pynvml.nvmlDeviceGetPersistenceMode(handle)
+                    gpu_persistence_mode.labels(gpu=str(i), uuid=uuid).set(1 if persistence == pynvml.NVML_FEATURE_ENABLED else 0)
+                    
+                    # MIG mode
+                    try:
+                        mig_mode = pynvml.nvmlDeviceGetMigMode(handle)
+                        gpu_mig_mode_current.labels(gpu=str(i), uuid=uuid).set(mig_mode.current)
+                        gpu_mig_mode_pending.labels(gpu=str(i), uuid=uuid).set(mig_mode.pending)
+                    except pynvml.NVMLError_NotSupported:
+                        pass
+                    
+                    # Accounting mode
+                    accounting = pynvml.nvmlDeviceGetAccountingMode(handle)
+                    gpu_accounting_mode.labels(gpu=str(i), uuid=uuid).set(1 if accounting == pynvml.NVML_FEATURE_ENABLED else 0)
+                    
+                    buffer_size = pynvml.nvmlDeviceGetAccountingBufferSize(handle)
+                    gpu_accounting_buffer_size.labels(gpu=str(i), uuid=uuid).set(buffer_size)
+                    
+                    # Board ID
+                    board_id = pynvml.nvmlDeviceGetBoardId(handle)
+                    gpu_board_id.labels(gpu=str(i), uuid=uuid).set(board_id)
+                    
+                    # Multiprocessor count
+                    mp_count = pynvml.nvmlDeviceGetMultiGpuBoard(handle)
+                    gpu_multiprocessor_count.labels(gpu=str(i), uuid=uuid).set(mp_count)
+                    
+                    # CUDA cores (estimate based on architecture)
+                    try:
+                        major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
+                        mp_count = pynvml.nvmlDeviceGetNumGpuCores(handle)
+                        # Rough estimation of CUDA cores based on compute capability
+                        if major == 8:  # Ampere
+                            cores_per_mp = 128
+                        elif major == 7:  # Turing/Volta
+                            cores_per_mp = 64
+                        elif major == 6:  # Pascal
+                            cores_per_mp = 128 if minor == 0 else 64
+                        else:
+                            cores_per_mp = 128  # Default
+                        
+                        cuda_cores = mp_count * cores_per_mp
+                        gpu_cuda_cores.labels(gpu=str(i), uuid=uuid).set(cuda_cores)
+                    except:
+                        pass
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get misc settings for GPU {i}: {e}")
+                
+                # Encoder/FBC stats
+                try:
+                    encoder_stats = pynvml.nvmlDeviceGetEncoderStats(handle)
+                    gpu_encoder_sessions.labels(gpu=str(i), uuid=uuid).set(encoder_stats.sessionCount)
+                    gpu_encoder_average_fps.labels(gpu=str(i), uuid=uuid).set(encoder_stats.averageFps)
+                    gpu_encoder_average_latency.labels(gpu=str(i), uuid=uuid).set(encoder_stats.averageLatency)
+                except Exception as e:
+                    logger.warning(f"Failed to get encoder stats for GPU {i}: {e}")
+                
+                try:
+                    fbc_stats = pynvml.nvmlDeviceGetFBCStats(handle)
+                    gpu_fbc_sessions.labels(gpu=str(i), uuid=uuid).set(fbc_stats.sessionCount)
+                    gpu_fbc_average_fps.labels(gpu=str(i), uuid=uuid).set(fbc_stats.averageFps)
+                    gpu_fbc_average_latency.labels(gpu=str(i), uuid=uuid).set(fbc_stats.averageLatency)
+                except Exception as e:
+                    logger.warning(f"Failed to get FBC stats for GPU {i}: {e}")
+                
+                # Violations
+                try:
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_POWER)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_power.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_THERMAL)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_thermal.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_SYNC_BOOST)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_sync_boost.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_BOARD_LIMIT)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_board_limit.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_LOW_UTILIZATION)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_low_util.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_RELIABILITY)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_reliability.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_TOTAL_APP_CLOCKS)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_app_clock.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                    violation_status = pynvml.nvmlDeviceGetViolationStatus(handle, pynvml.NVML_PERF_POLICY_TOTAL_BASE_CLOCKS)
+                    if violation_status.violationTime > 0:
+                        gpu_violations_clock_throttle.labels(gpu=str(i), uuid=uuid)._value.set(violation_status.violationTime)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to get violation status for GPU {i}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Error collecting metrics: {e}", exc_info=True)
+    
+    if __name__ == '__main__':
+        # Start HTTP server
+        start_http_server(9836)
+        logger.info("NVIDIA GPU Exporter (pynvml) started on port 9836")
+        
+        # Collect metrics every 5 seconds
+        while True:
+            try:
+                collect_metrics()
+            except KeyboardInterrupt:
+                logger.info("Exporter stopped by user")
+                pynvml.nvmlShutdown()
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+            
+            time.sleep(5)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-gpu-exporter-pynvml
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter-pynvml
+  template:
+    metadata:
+      labels:
+        app: nvidia-gpu-exporter-pynvml
+    spec:
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: nvidia-gpu-exporter-pynvml
+        image: nvidia/cuda:12.0.0-runtime-ubuntu22.04
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update && apt-get install -y python3 python3-pip
+          pip3 install prometheus_client pynvml
+          python3 /scripts/nvidia_gpu_exporter_pynvml.py
+        ports:
+        - containerPort: 9836
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: nvidia-ml
+          mountPath: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          readOnly: true
+        - name: dev
+          mountPath: /dev
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "utility"
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: nvidia-gpu-exporter-pynvml-script
+          defaultMode: 0755
+      - name: nvidia-ml
+        hostPath:
+          path: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          type: File
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-gpu-exporter-pynvml
+  namespace: monitoring
+  labels:
+    app: nvidia-gpu-exporter-pynvml
+spec:
+  selector:
+    app: nvidia-gpu-exporter-pynvml
+  ports:
+  - name: metrics
+    port: 9836
+    targetPort: 9836
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-gpu-exporter-pynvml
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter-pynvml
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics

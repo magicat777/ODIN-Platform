@@ -1,0 +1,590 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-gpu-exporter-script
+  namespace: monitoring
+data:
+  nvidia_gpu_exporter.py: |
+    #!/usr/bin/env python3
+    import subprocess
+    import re
+    import time
+    import json
+    from prometheus_client import start_http_server, Gauge, Counter, Info, Histogram
+    import xml.etree.ElementTree as ET
+    
+    # Basic GPU Information
+    gpu_info = Info('nvidia_gpu', 'GPU Information', ['gpu'])
+    
+    # Temperature metrics
+    gpu_temp = Gauge('nvidia_gpu_temperature_celsius', 'GPU Temperature in Celsius', ['gpu', 'uuid'])
+    gpu_temp_max = Gauge('nvidia_gpu_temperature_max_celsius', 'GPU Max Temperature in Celsius', ['gpu', 'uuid'])
+    gpu_temp_slow_threshold = Gauge('nvidia_gpu_temperature_slow_threshold_celsius', 'GPU Slow Threshold Temperature', ['gpu', 'uuid'])
+    gpu_temp_shutdown_threshold = Gauge('nvidia_gpu_temperature_shutdown_threshold_celsius', 'GPU Shutdown Threshold Temperature', ['gpu', 'uuid'])
+    gpu_memory_temp = Gauge('nvidia_gpu_memory_temperature_celsius', 'GPU Memory Temperature in Celsius', ['gpu', 'uuid'])
+    
+    # Power metrics
+    gpu_power_draw = Gauge('nvidia_gpu_power_draw_watts', 'GPU Power Draw in Watts', ['gpu', 'uuid'])
+    gpu_power_limit = Gauge('nvidia_gpu_power_limit_watts', 'GPU Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_default_limit = Gauge('nvidia_gpu_power_default_limit_watts', 'GPU Default Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_enforced_limit = Gauge('nvidia_gpu_power_enforced_limit_watts', 'GPU Enforced Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_min_limit = Gauge('nvidia_gpu_power_min_limit_watts', 'GPU Min Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_power_max_limit = Gauge('nvidia_gpu_power_max_limit_watts', 'GPU Max Power Limit in Watts', ['gpu', 'uuid'])
+    gpu_energy_consumption = Counter('nvidia_gpu_energy_consumption_joules_total', 'GPU Total Energy Consumption in Joules', ['gpu', 'uuid'])
+    
+    # Memory metrics
+    gpu_memory_used = Gauge('nvidia_gpu_memory_used_bytes', 'GPU Memory Used in Bytes', ['gpu', 'uuid'])
+    gpu_memory_free = Gauge('nvidia_gpu_memory_free_bytes', 'GPU Memory Free in Bytes', ['gpu', 'uuid'])
+    gpu_memory_total = Gauge('nvidia_gpu_memory_total_bytes', 'GPU Memory Total in Bytes', ['gpu', 'uuid'])
+    gpu_memory_reserved = Gauge('nvidia_gpu_memory_reserved_bytes', 'GPU Memory Reserved in Bytes', ['gpu', 'uuid'])
+    gpu_bar1_memory_used = Gauge('nvidia_gpu_bar1_memory_used_bytes', 'GPU BAR1 Memory Used in Bytes', ['gpu', 'uuid'])
+    gpu_bar1_memory_free = Gauge('nvidia_gpu_bar1_memory_free_bytes', 'GPU BAR1 Memory Free in Bytes', ['gpu', 'uuid'])
+    gpu_bar1_memory_total = Gauge('nvidia_gpu_bar1_memory_total_bytes', 'GPU BAR1 Memory Total in Bytes', ['gpu', 'uuid'])
+    
+    # Utilization metrics
+    gpu_utilization = Gauge('nvidia_gpu_utilization_percent', 'GPU Utilization Percentage', ['gpu', 'uuid'])
+    gpu_memory_utilization = Gauge('nvidia_gpu_memory_utilization_percent', 'GPU Memory Utilization Percentage', ['gpu', 'uuid'])
+    gpu_encoder_utilization = Gauge('nvidia_gpu_encoder_utilization_percent', 'GPU Encoder Utilization Percentage', ['gpu', 'uuid'])
+    gpu_decoder_utilization = Gauge('nvidia_gpu_decoder_utilization_percent', 'GPU Decoder Utilization Percentage', ['gpu', 'uuid'])
+    
+    # Clock metrics
+    gpu_clock_graphics = Gauge('nvidia_gpu_clock_graphics_mhz', 'GPU Graphics Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_graphics_max = Gauge('nvidia_gpu_clock_graphics_max_mhz', 'GPU Max Graphics Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_sm = Gauge('nvidia_gpu_clock_sm_mhz', 'GPU SM Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_sm_max = Gauge('nvidia_gpu_clock_sm_max_mhz', 'GPU Max SM Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_memory = Gauge('nvidia_gpu_clock_memory_mhz', 'GPU Memory Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_memory_max = Gauge('nvidia_gpu_clock_memory_max_mhz', 'GPU Max Memory Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_video = Gauge('nvidia_gpu_clock_video_mhz', 'GPU Video Clock in MHz', ['gpu', 'uuid'])
+    gpu_clock_video_max = Gauge('nvidia_gpu_clock_video_max_mhz', 'GPU Max Video Clock in MHz', ['gpu', 'uuid'])
+    
+    # Fan metrics
+    gpu_fan_speed = Gauge('nvidia_gpu_fan_speed_percent', 'GPU Fan Speed Percentage', ['gpu', 'uuid', 'fan'])
+    
+    # PCIe metrics
+    gpu_pcie_link_generation = Gauge('nvidia_gpu_pcie_link_generation', 'PCIe Link Generation', ['gpu', 'uuid'])
+    gpu_pcie_link_generation_max = Gauge('nvidia_gpu_pcie_link_generation_max', 'PCIe Max Link Generation', ['gpu', 'uuid'])
+    gpu_pcie_link_width = Gauge('nvidia_gpu_pcie_link_width', 'PCIe Link Width', ['gpu', 'uuid'])
+    gpu_pcie_link_width_max = Gauge('nvidia_gpu_pcie_link_width_max', 'PCIe Max Link Width', ['gpu', 'uuid'])
+    gpu_pcie_tx_throughput = Gauge('nvidia_gpu_pcie_tx_throughput_mbps', 'PCIe TX Throughput in MB/s', ['gpu', 'uuid'])
+    gpu_pcie_rx_throughput = Gauge('nvidia_gpu_pcie_rx_throughput_mbps', 'PCIe RX Throughput in MB/s', ['gpu', 'uuid'])
+    gpu_pcie_replay_counter = Counter('nvidia_gpu_pcie_replay_counter_total', 'PCIe Replay Counter', ['gpu', 'uuid'])
+    
+    # Performance state
+    gpu_performance_state = Gauge('nvidia_gpu_performance_state', 'GPU Performance State (P-State)', ['gpu', 'uuid'])
+    gpu_clocks_throttle_reasons = Gauge('nvidia_gpu_clocks_throttle_reasons', 'GPU Clock Throttle Reasons Bitmask', ['gpu', 'uuid'])
+    
+    # Compute metrics
+    gpu_compute_mode = Gauge('nvidia_gpu_compute_mode', 'GPU Compute Mode', ['gpu', 'uuid'])
+    gpu_cuda_cores = Gauge('nvidia_gpu_cuda_cores', 'Number of CUDA Cores', ['gpu', 'uuid'])
+    gpu_sm_count = Gauge('nvidia_gpu_sm_count', 'Number of Streaming Multiprocessors', ['gpu', 'uuid'])
+    
+    # ECC metrics
+    gpu_ecc_mode_current = Gauge('nvidia_gpu_ecc_mode_current', 'GPU Current ECC Mode', ['gpu', 'uuid'])
+    gpu_ecc_mode_pending = Gauge('nvidia_gpu_ecc_mode_pending', 'GPU Pending ECC Mode', ['gpu', 'uuid'])
+    gpu_ecc_single_bit_errors = Counter('nvidia_gpu_ecc_single_bit_errors_total', 'GPU ECC Single Bit Errors', ['gpu', 'uuid', 'memory_location'])
+    gpu_ecc_double_bit_errors = Counter('nvidia_gpu_ecc_double_bit_errors_total', 'GPU ECC Double Bit Errors', ['gpu', 'uuid', 'memory_location'])
+    
+    # Process metrics
+    gpu_process_count = Gauge('nvidia_gpu_process_count', 'Number of processes using GPU', ['gpu', 'uuid'])
+    gpu_process_memory_used = Gauge('nvidia_gpu_process_memory_used_bytes', 'GPU Memory Used by Process', ['gpu', 'uuid', 'pid', 'process_name', 'type'])
+    
+    # Voltage/Current metrics (if available)
+    gpu_voltage = Gauge('nvidia_gpu_voltage_mv', 'GPU Core Voltage in millivolts', ['gpu', 'uuid'])
+    
+    # MIG (Multi-Instance GPU) metrics for RTX 4080
+    gpu_mig_mode_current = Gauge('nvidia_gpu_mig_mode_current', 'GPU MIG Mode Current', ['gpu', 'uuid'])
+    gpu_mig_devices_count = Gauge('nvidia_gpu_mig_devices_count', 'Number of MIG Devices', ['gpu', 'uuid'])
+    
+    # Additional RTX 4080 specific metrics
+    gpu_tensor_cores = Gauge('nvidia_gpu_tensor_cores', 'Number of Tensor Cores', ['gpu', 'uuid'])
+    gpu_rt_cores = Gauge('nvidia_gpu_rt_cores', 'Number of RT Cores', ['gpu', 'uuid'])
+    
+    def parse_value(text, suffix=''):
+        """Parse a value removing the suffix"""
+        if text is None or text == 'N/A':
+            return None
+        return float(text.replace(suffix, '').strip())
+    
+    def get_gpu_metrics():
+        try:
+            # Run nvidia-smi with detailed XML output
+            result = subprocess.run(['nvidia-smi', '-q', '-x'], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Error running nvidia-smi: {result.stderr}")
+                return
+            
+            root = ET.fromstring(result.stdout)
+            
+            for gpu in root.findall('gpu'):
+                gpu_id_elem = gpu.find('minor_number')
+                uuid_elem = gpu.find('uuid')
+                if gpu_id_elem is None or uuid_elem is None:
+                    continue
+                    
+                gpu_id = gpu_id_elem.text
+                uuid = uuid_elem.text
+                
+                # Basic GPU info
+                gpu_name_elem = gpu.find('product_name')
+                if gpu_name_elem is None:
+                    continue
+                    
+                gpu_name = gpu_name_elem.text
+                serial_elem = gpu.find('serial')
+                vbios_elem = gpu.find('vbios_version')
+                arch_elem = gpu.find('product_architecture')
+                driver_elem = root.find('driver_version')
+                cuda_elem = root.find('cuda_version')
+                
+                gpu_info.labels(gpu=gpu_id).info({
+                    'name': gpu_name,
+                    'uuid': uuid,
+                    'serial': serial_elem.text if serial_elem is not None else 'N/A',
+                    'driver_version': driver_elem.text if driver_elem is not None else 'N/A',
+                    'cuda_version': cuda_elem.text if cuda_elem is not None else 'N/A',
+                    'vbios_version': vbios_elem.text if vbios_elem is not None else 'N/A',
+                    'architecture': arch_elem.text if arch_elem is not None else 'N/A'
+                })
+                
+                # Temperature metrics
+                temp_elem = gpu.find('temperature/gpu_temp')
+                if temp_elem is not None:
+                    temp_gpu = parse_value(temp_elem.text, ' C')
+                    if temp_gpu is not None:
+                        gpu_temp.labels(gpu=gpu_id, uuid=uuid).set(temp_gpu)
+                
+                temp_max_elem = gpu.find('temperature/gpu_temp_max')
+                if temp_max_elem is not None:
+                    temp_max = parse_value(temp_max_elem.text, ' C')
+                    if temp_max is not None:
+                        gpu_temp_max.labels(gpu=gpu_id, uuid=uuid).set(temp_max)
+                
+                temp_slow_elem = gpu.find('temperature/gpu_temp_slow')
+                if temp_slow_elem is not None:
+                    temp_slow = parse_value(temp_slow_elem.text, ' C')
+                    if temp_slow is not None:
+                        gpu_temp_slow_threshold.labels(gpu=gpu_id, uuid=uuid).set(temp_slow)
+                
+                temp_shutdown_elem = gpu.find('temperature/gpu_temp_shutdown')
+                if temp_shutdown_elem is not None:
+                    temp_shutdown = parse_value(temp_shutdown_elem.text, ' C')
+                    if temp_shutdown is not None:
+                        gpu_temp_shutdown_threshold.labels(gpu=gpu_id, uuid=uuid).set(temp_shutdown)
+                
+                # Memory temperature (if available)
+                mem_temp_elem = gpu.find('temperature/mem_temp')
+                if mem_temp_elem is not None:
+                    mem_temp = parse_value(mem_temp_elem.text, ' C')
+                    if mem_temp is not None:
+                        gpu_memory_temp.labels(gpu=gpu_id, uuid=uuid).set(mem_temp)
+                
+                # Power metrics
+                power_readings = gpu.find('gpu_power_readings')
+                if power_readings is not None:
+                    power_draw_elem = power_readings.find('power_draw')
+                    if power_draw_elem is not None:
+                        power_draw = parse_value(power_draw_elem.text, ' W')
+                        if power_draw is not None:
+                            gpu_power_draw.labels(gpu=gpu_id, uuid=uuid).set(power_draw)
+                    
+                    power_limit_elem = power_readings.find('power_limit')
+                    if power_limit_elem is not None:
+                        power_limit = parse_value(power_limit_elem.text, ' W')
+                        if power_limit is not None:
+                            gpu_power_limit.labels(gpu=gpu_id, uuid=uuid).set(power_limit)
+                    
+                    default_limit_elem = power_readings.find('default_power_limit')
+                    if default_limit_elem is not None:
+                        default_limit = parse_value(default_limit_elem.text, ' W')
+                        if default_limit is not None:
+                            gpu_power_default_limit.labels(gpu=gpu_id, uuid=uuid).set(default_limit)
+                    
+                    enforced_limit_elem = power_readings.find('enforced_power_limit')
+                    if enforced_limit_elem is not None:
+                        enforced_limit = parse_value(enforced_limit_elem.text, ' W')
+                        if enforced_limit is not None:
+                            gpu_power_enforced_limit.labels(gpu=gpu_id, uuid=uuid).set(enforced_limit)
+                    
+                    min_limit_elem = power_readings.find('min_power_limit')
+                    if min_limit_elem is not None:
+                        min_limit = parse_value(min_limit_elem.text, ' W')
+                        if min_limit is not None:
+                            gpu_power_min_limit.labels(gpu=gpu_id, uuid=uuid).set(min_limit)
+                    
+                    max_limit_elem = power_readings.find('max_power_limit')
+                    if max_limit_elem is not None:
+                        max_limit = parse_value(max_limit_elem.text, ' W')
+                        if max_limit is not None:
+                            gpu_power_max_limit.labels(gpu=gpu_id, uuid=uuid).set(max_limit)
+                
+                # Memory metrics
+                fb_memory = gpu.find('fb_memory_usage')
+                if fb_memory is not None:
+                    mem_used_elem = fb_memory.find('used')
+                    mem_free_elem = fb_memory.find('free')
+                    mem_total_elem = fb_memory.find('total')
+                    mem_reserved_elem = fb_memory.find('reserved')
+                    
+                    mem_used = parse_value(mem_used_elem.text, ' MiB') if mem_used_elem is not None else None
+                    mem_free = parse_value(mem_free_elem.text, ' MiB') if mem_free_elem is not None else None
+                    mem_total = parse_value(mem_total_elem.text, ' MiB') if mem_total_elem is not None else None
+                    mem_reserved = parse_value(mem_reserved_elem.text, ' MiB') if mem_reserved_elem is not None else None
+                    
+                    if mem_used is not None:
+                        gpu_memory_used.labels(gpu=gpu_id, uuid=uuid).set(mem_used * 1024 * 1024)
+                    if mem_free is not None:
+                        gpu_memory_free.labels(gpu=gpu_id, uuid=uuid).set(mem_free * 1024 * 1024)
+                    if mem_total is not None:
+                        gpu_memory_total.labels(gpu=gpu_id, uuid=uuid).set(mem_total * 1024 * 1024)
+                    if mem_reserved is not None:
+                        gpu_memory_reserved.labels(gpu=gpu_id, uuid=uuid).set(mem_reserved * 1024 * 1024)
+                
+                # BAR1 Memory
+                bar1_memory = gpu.find('bar1_memory_usage')
+                if bar1_memory is not None:
+                    bar1_used_elem = bar1_memory.find('used')
+                    bar1_free_elem = bar1_memory.find('free')
+                    bar1_total_elem = bar1_memory.find('total')
+                    
+                    bar1_used = parse_value(bar1_used_elem.text, ' MiB') if bar1_used_elem is not None else None
+                    bar1_free = parse_value(bar1_free_elem.text, ' MiB') if bar1_free_elem is not None else None
+                    bar1_total = parse_value(bar1_total_elem.text, ' MiB') if bar1_total_elem is not None else None
+                    
+                    if bar1_used is not None:
+                        gpu_bar1_memory_used.labels(gpu=gpu_id, uuid=uuid).set(bar1_used * 1024 * 1024)
+                    if bar1_free is not None:
+                        gpu_bar1_memory_free.labels(gpu=gpu_id, uuid=uuid).set(bar1_free * 1024 * 1024)
+                    if bar1_total is not None:
+                        gpu_bar1_memory_total.labels(gpu=gpu_id, uuid=uuid).set(bar1_total * 1024 * 1024)
+                
+                # Utilization metrics
+                utilization = gpu.find('utilization')
+                if utilization is not None:
+                    util_gpu_elem = utilization.find('gpu_util')
+                    util_memory_elem = utilization.find('memory_util')
+                    util_encoder_elem = utilization.find('encoder_util')
+                    util_decoder_elem = utilization.find('decoder_util')
+                    
+                    util_gpu = parse_value(util_gpu_elem.text, ' %') if util_gpu_elem is not None else None
+                    util_memory = parse_value(util_memory_elem.text, ' %') if util_memory_elem is not None else None
+                    util_encoder = parse_value(util_encoder_elem.text, ' %') if util_encoder_elem is not None else None
+                    util_decoder = parse_value(util_decoder_elem.text, ' %') if util_decoder_elem is not None else None
+                    
+                    if util_gpu is not None:
+                        gpu_utilization.labels(gpu=gpu_id, uuid=uuid).set(util_gpu)
+                    if util_memory is not None:
+                        gpu_memory_utilization.labels(gpu=gpu_id, uuid=uuid).set(util_memory)
+                    if util_encoder is not None:
+                        gpu_encoder_utilization.labels(gpu=gpu_id, uuid=uuid).set(util_encoder)
+                    if util_decoder is not None:
+                        gpu_decoder_utilization.labels(gpu=gpu_id, uuid=uuid).set(util_decoder)
+                
+                # Clock metrics
+                clocks = gpu.find('clocks')
+                if clocks is not None:
+                    graphics_clock_elem = clocks.find('graphics_clock')
+                    sm_clock_elem = clocks.find('sm_clock')
+                    mem_clock_elem = clocks.find('mem_clock')
+                    video_clock_elem = clocks.find('video_clock')
+                    
+                    graphics_clock = parse_value(graphics_clock_elem.text, ' MHz') if graphics_clock_elem is not None else None
+                    sm_clock = parse_value(sm_clock_elem.text, ' MHz') if sm_clock_elem is not None else None
+                    mem_clock = parse_value(mem_clock_elem.text, ' MHz') if mem_clock_elem is not None else None
+                    video_clock = parse_value(video_clock_elem.text, ' MHz') if video_clock_elem is not None else None
+                    
+                    if graphics_clock is not None:
+                        gpu_clock_graphics.labels(gpu=gpu_id, uuid=uuid).set(graphics_clock)
+                    if sm_clock is not None:
+                        gpu_clock_sm.labels(gpu=gpu_id, uuid=uuid).set(sm_clock)
+                    if mem_clock is not None:
+                        gpu_clock_memory.labels(gpu=gpu_id, uuid=uuid).set(mem_clock)
+                    if video_clock is not None:
+                        gpu_clock_video.labels(gpu=gpu_id, uuid=uuid).set(video_clock)
+                
+                # Max clocks
+                max_clocks = gpu.find('max_clocks')
+                if max_clocks is not None:
+                    max_graphics_elem = max_clocks.find('graphics_clock')
+                    max_sm_elem = max_clocks.find('sm_clock')
+                    max_mem_elem = max_clocks.find('mem_clock')
+                    max_video_elem = max_clocks.find('video_clock')
+                    
+                    max_graphics = parse_value(max_graphics_elem.text, ' MHz') if max_graphics_elem is not None else None
+                    max_sm = parse_value(max_sm_elem.text, ' MHz') if max_sm_elem is not None else None
+                    max_mem = parse_value(max_mem_elem.text, ' MHz') if max_mem_elem is not None else None
+                    max_video = parse_value(max_video_elem.text, ' MHz') if max_video_elem is not None else None
+                    
+                    if max_graphics is not None:
+                        gpu_clock_graphics_max.labels(gpu=gpu_id, uuid=uuid).set(max_graphics)
+                    if max_sm is not None:
+                        gpu_clock_sm_max.labels(gpu=gpu_id, uuid=uuid).set(max_sm)
+                    if max_mem is not None:
+                        gpu_clock_memory_max.labels(gpu=gpu_id, uuid=uuid).set(max_mem)
+                    if max_video is not None:
+                        gpu_clock_video_max.labels(gpu=gpu_id, uuid=uuid).set(max_video)
+                
+                # Fan speed (can be multiple fans)
+                fan_idx = 0
+                for fan_elem in gpu.findall('.//fan_speed'):
+                    if fan_elem is not None and fan_elem.text != 'N/A':
+                        fan = parse_value(fan_elem.text, ' %')
+                        if fan is not None:
+                            gpu_fan_speed.labels(gpu=gpu_id, uuid=uuid, fan=str(fan_idx)).set(fan)
+                        fan_idx += 1
+                
+                # PCIe metrics
+                pci = gpu.find('pci')
+                if pci is not None:
+                    pcie_gen_elem = pci.find('pci_gpu_link_info/pcie_gen/current_link_gen')
+                    if pcie_gen_elem is not None:
+                        pcie_gen = parse_value(pcie_gen_elem.text)
+                        if pcie_gen is not None:
+                            gpu_pcie_link_generation.labels(gpu=gpu_id, uuid=uuid).set(pcie_gen)
+                    
+                    pcie_gen_max_elem = pci.find('pci_gpu_link_info/pcie_gen/max_link_gen')
+                    if pcie_gen_max_elem is not None:
+                        pcie_gen_max = parse_value(pcie_gen_max_elem.text)
+                        if pcie_gen_max is not None:
+                            gpu_pcie_link_generation_max.labels(gpu=gpu_id, uuid=uuid).set(pcie_gen_max)
+                    
+                    pcie_width_elem = pci.find('pci_gpu_link_info/link_widths/current_link_width')
+                    if pcie_width_elem is not None:
+                        pcie_width = parse_value(pcie_width_elem.text, 'x')
+                        if pcie_width is not None:
+                            gpu_pcie_link_width.labels(gpu=gpu_id, uuid=uuid).set(pcie_width)
+                    
+                    pcie_width_max_elem = pci.find('pci_gpu_link_info/link_widths/max_link_width')
+                    if pcie_width_max_elem is not None:
+                        pcie_width_max = parse_value(pcie_width_max_elem.text, 'x')
+                        if pcie_width_max is not None:
+                            gpu_pcie_link_width_max.labels(gpu=gpu_id, uuid=uuid).set(pcie_width_max)
+                    
+                    # Throughput
+                    tx_util_elem = pci.find('tx_util')
+                    if tx_util_elem is not None:
+                        tx_util = parse_value(tx_util_elem.text, ' KB/s')
+                        if tx_util is not None:
+                            gpu_pcie_tx_throughput.labels(gpu=gpu_id, uuid=uuid).set(tx_util / 1024)  # Convert to MB/s
+                    
+                    rx_util_elem = pci.find('rx_util')
+                    if rx_util_elem is not None:
+                        rx_util = parse_value(rx_util_elem.text, ' KB/s')
+                        if rx_util is not None:
+                            gpu_pcie_rx_throughput.labels(gpu=gpu_id, uuid=uuid).set(rx_util / 1024)
+                    
+                    # Replay counter
+                    replay_elem = pci.find('replay_counter')
+                    if replay_elem is not None:
+                        replay_count = parse_value(replay_elem.text)
+                        if replay_count is not None:
+                            gpu_pcie_replay_counter.labels(gpu=gpu_id, uuid=uuid).inc(replay_count)
+                
+                # Performance state
+                pstate = gpu.find('performance_state')
+                if pstate is not None and pstate.text:
+                    # Extract numeric value from P0, P1, etc.
+                    pstate_num = int(pstate.text.replace('P', ''))
+                    gpu_performance_state.labels(gpu=gpu_id, uuid=uuid).set(pstate_num)
+                
+                # Clock throttle reasons
+                throttle_reasons = gpu.find('clocks_throttle_reasons')
+                if throttle_reasons is not None:
+                    throttle_bitmask = 0
+                    reasons_map = {
+                        'clocks_throttle_reason_gpu_idle': 1,
+                        'clocks_throttle_reason_applications_clocks_setting': 2,
+                        'clocks_throttle_reason_sw_power_cap': 4,
+                        'clocks_throttle_reason_hw_slowdown': 8,
+                        'clocks_throttle_reason_hw_thermal_slowdown': 16,
+                        'clocks_throttle_reason_hw_power_brake_slowdown': 32,
+                        'clocks_throttle_reason_sync_boost': 64,
+                        'clocks_throttle_reason_sw_thermal_slowdown': 128,
+                        'clocks_throttle_reason_display_clocks_setting': 256
+                    }
+                    
+                    for reason, bit in reasons_map.items():
+                        reason_elem = throttle_reasons.find(reason)
+                        if reason_elem is not None and reason_elem.text == 'Active':
+                            throttle_bitmask |= bit
+                    
+                    gpu_clocks_throttle_reasons.labels(gpu=gpu_id, uuid=uuid).set(throttle_bitmask)
+                
+                # Compute mode
+                compute_mode = gpu.find('compute_mode')
+                if compute_mode is not None:
+                    mode_map = {
+                        'Default': 0,
+                        'Exclusive_Thread': 1,
+                        'Prohibited': 2,
+                        'Exclusive_Process': 3
+                    }
+                    mode = mode_map.get(compute_mode.text, -1)
+                    gpu_compute_mode.labels(gpu=gpu_id, uuid=uuid).set(mode)
+                
+                # Architecture specific metrics
+                # For RTX 4080: 76 SMs, 9728 CUDA cores, 304 Tensor cores, 76 RT cores
+                if 'RTX 4080' in gpu_name:
+                    gpu_sm_count.labels(gpu=gpu_id, uuid=uuid).set(76)
+                    gpu_cuda_cores.labels(gpu=gpu_id, uuid=uuid).set(9728)
+                    gpu_tensor_cores.labels(gpu=gpu_id, uuid=uuid).set(304)
+                    gpu_rt_cores.labels(gpu=gpu_id, uuid=uuid).set(76)
+                
+                # ECC mode
+                ecc = gpu.find('ecc_mode')
+                if ecc is not None:
+                    current_ecc = ecc.find('current_ecc')
+                    pending_ecc = ecc.find('pending_ecc')
+                    if current_ecc is not None:
+                        gpu_ecc_mode_current.labels(gpu=gpu_id, uuid=uuid).set(1 if current_ecc.text == 'Enabled' else 0)
+                    if pending_ecc is not None:
+                        gpu_ecc_mode_pending.labels(gpu=gpu_id, uuid=uuid).set(1 if pending_ecc.text == 'Enabled' else 0)
+                
+                # Process information
+                processes = gpu.find('processes')
+                if processes is not None:
+                    process_count = 0
+                    for process in processes.findall('process_info'):
+                        process_count += 1
+                        pid_elem = process.find('pid')
+                        process_name_elem = process.find('process_name')
+                        process_type_elem = process.find('type')
+                        used_memory_elem = process.find('used_memory')
+                        
+                        if pid_elem is not None and process_name_elem is not None:
+                            pid = pid_elem.text
+                            process_name = process_name_elem.text
+                            process_type = process_type_elem.text if process_type_elem is not None else 'Unknown'
+                            used_memory = parse_value(used_memory_elem.text, ' MiB') if used_memory_elem is not None else None
+                        
+                            if used_memory is not None:
+                                gpu_process_memory_used.labels(
+                                    gpu=gpu_id, 
+                                    uuid=uuid, 
+                                    pid=pid, 
+                                    process_name=process_name,
+                                    type=process_type
+                                ).set(used_memory * 1024 * 1024)
+                    
+                    gpu_process_count.labels(gpu=gpu_id, uuid=uuid).set(process_count)
+                
+                # MIG mode
+                mig_mode = gpu.find('mig_mode')
+                if mig_mode is not None:
+                    current_mig = mig_mode.find('current_mig')
+                    if current_mig is not None:
+                        gpu_mig_mode_current.labels(gpu=gpu_id, uuid=uuid).set(1 if current_mig.text == 'Enabled' else 0)
+                
+        except Exception as e:
+            print(f"Error collecting GPU metrics: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if __name__ == '__main__':
+        # Start HTTP server
+        start_http_server(9835)
+        print("NVIDIA GPU Comprehensive Exporter started on port 9835")
+        
+        # Collect metrics every 5 seconds
+        while True:
+            get_gpu_metrics()
+            time.sleep(5)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter
+  template:
+    metadata:
+      labels:
+        app: nvidia-gpu-exporter
+    spec:
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: nvidia-gpu-exporter
+        image: nvidia/cuda:12.0.0-runtime-ubuntu22.04
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          apt-get update && apt-get install -y python3 python3-pip
+          pip3 install prometheus_client
+          python3 /scripts/nvidia_gpu_exporter.py
+        ports:
+        - containerPort: 9835
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: nvidia-smi
+          mountPath: /usr/bin/nvidia-smi
+          readOnly: true
+        - name: nvidia-ml
+          mountPath: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          readOnly: true
+        - name: dev
+          mountPath: /dev
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "utility"
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: nvidia-gpu-exporter-script
+          defaultMode: 0755
+      - name: nvidia-smi
+        hostPath:
+          path: /usr/bin/nvidia-smi
+          type: File
+      - name: nvidia-ml
+        hostPath:
+          path: /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+          type: File
+      - name: dev
+        hostPath:
+          path: /dev
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+  labels:
+    app: nvidia-gpu-exporter
+spec:
+  selector:
+    app: nvidia-gpu-exporter
+  ports:
+  - name: metrics
+    port: 9835
+    targetPort: 9835
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-gpu-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-gpu-exporter
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics

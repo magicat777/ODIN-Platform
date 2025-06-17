@@ -1,0 +1,251 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: disk-io-exporter
+  namespace: monitoring
+data:
+  disk_io_exporter.py: |
+    #!/usr/bin/env python3
+    import os
+    import time
+    import psutil
+    from prometheus_client import start_http_server, Counter, Gauge, Histogram
+
+    # Disk I/O metrics - these should be Counters for rate() to work
+    # But since psutil gives us cumulative values, we'll use Gauges and track deltas
+    disk_read_bytes = Gauge('node_disk_read_bytes_total', 'Total bytes read from disk', ['device'])
+    disk_write_bytes = Gauge('node_disk_written_bytes_total', 'Total bytes written to disk', ['device'])
+    disk_read_time = Gauge('node_disk_read_time_seconds_total', 'Total time spent reading', ['device'])
+    disk_write_time = Gauge('node_disk_write_time_seconds_total', 'Total time spent writing', ['device'])
+    disk_reads_completed = Gauge('node_disk_reads_completed_total', 'Total read operations', ['device'])
+    disk_writes_completed = Gauge('node_disk_writes_completed_total', 'Total write operations', ['device'])
+    
+    # Current I/O stats
+    disk_io_time_weighted = Gauge('node_disk_io_time_weighted_seconds_total', 'Weighted I/O time', ['device'])
+    disk_io_now = Gauge('node_disk_io_now', 'Number of I/Os in progress', ['device'])
+    
+    # Rate metrics (calculated by the exporter)
+    disk_read_bytes_rate = Gauge('node_disk_read_bytes_rate', 'Disk read rate in bytes/sec', ['device'])
+    disk_write_bytes_rate = Gauge('node_disk_write_bytes_rate', 'Disk write rate in bytes/sec', ['device'])
+    disk_read_iops = Gauge('node_disk_read_iops', 'Disk read IOPS', ['device'])
+    disk_write_iops = Gauge('node_disk_write_iops', 'Disk write IOPS', ['device'])
+    
+    # Disk usage
+    disk_free_bytes = Gauge('node_disk_free_bytes', 'Free space in bytes', ['mountpoint', 'device', 'fstype'])
+    disk_total_bytes = Gauge('node_disk_total_bytes', 'Total space in bytes', ['mountpoint', 'device', 'fstype'])
+    disk_used_percent = Gauge('node_disk_used_percent', 'Disk usage percentage', ['mountpoint', 'device', 'fstype'])
+    disk_inodes_free = Gauge('node_disk_inodes_free', 'Free inodes', ['mountpoint', 'device', 'fstype'])
+    disk_inodes_total = Gauge('node_disk_inodes_total', 'Total inodes', ['mountpoint', 'device', 'fstype'])
+    
+    # I/O latency histogram
+    io_latency = Histogram('node_disk_io_latency_seconds', 'I/O operation latency', ['device', 'operation'])
+    
+    # Track previous values for rate calculation
+    prev_io_stats = {}
+    
+    def get_disk_stats():
+        """Get disk I/O statistics"""
+        io_counters = psutil.disk_io_counters(perdisk=True, nowrap=True)
+        
+        for device, stats in io_counters.items():
+            # Skip loop devices and ram disks
+            if device.startswith('loop') or device.startswith('ram'):
+                continue
+            
+            # Update gauges
+            disk_read_bytes.labels(device=device).set(stats.read_bytes)
+            disk_write_bytes.labels(device=device).set(stats.write_bytes)
+            disk_reads_completed.labels(device=device).set(stats.read_count)
+            disk_writes_completed.labels(device=device).set(stats.write_count)
+            disk_read_time.labels(device=device).set(stats.read_time / 1000.0)  # Convert to seconds
+            disk_write_time.labels(device=device).set(stats.write_time / 1000.0)
+            
+            if hasattr(stats, 'busy_time'):
+                disk_io_time_weighted.labels(device=device).set(stats.busy_time / 1000.0)
+            
+            # Calculate rates and latency if we have previous stats
+            if device in prev_io_stats:
+                prev = prev_io_stats[device]
+                time_diff = time.time() - prev['timestamp']
+                
+                if time_diff > 0:
+                    # Calculate byte rates
+                    read_bytes_diff = stats.read_bytes - prev['read_bytes']
+                    write_bytes_diff = stats.write_bytes - prev['write_bytes']
+                    disk_read_bytes_rate.labels(device=device).set(read_bytes_diff / time_diff)
+                    disk_write_bytes_rate.labels(device=device).set(write_bytes_diff / time_diff)
+                    
+                    # Calculate IOPS
+                    read_count_diff = stats.read_count - prev['read_count']
+                    write_count_diff = stats.write_count - prev['write_count']
+                    disk_read_iops.labels(device=device).set(read_count_diff / time_diff)
+                    disk_write_iops.labels(device=device).set(write_count_diff / time_diff)
+                    
+                    # Read latency
+                    if read_count_diff > 0:
+                        read_time_diff = (stats.read_time - prev['read_time']) / 1000.0
+                        avg_read_latency = read_time_diff / read_count_diff
+                        io_latency.labels(device=device, operation='read').observe(avg_read_latency)
+                    
+                    # Write latency
+                    if write_count_diff > 0:
+                        write_time_diff = (stats.write_time - prev['write_time']) / 1000.0
+                        avg_write_latency = write_time_diff / write_count_diff
+                        io_latency.labels(device=device, operation='write').observe(avg_write_latency)
+            
+            # Store current stats with timestamp
+            prev_io_stats[device] = {
+                'read_count': stats.read_count,
+                'write_count': stats.write_count,
+                'read_bytes': stats.read_bytes,
+                'write_bytes': stats.write_bytes,
+                'read_time': stats.read_time,
+                'write_time': stats.write_time,
+                'timestamp': time.time()
+            }
+    
+    def get_disk_usage():
+        """Get disk usage statistics"""
+        partitions = psutil.disk_partitions(all=False)
+        
+        for partition in partitions:
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+                
+                # Device name cleanup
+                device = partition.device.replace('/dev/', '')
+                
+                # Set metrics
+                disk_free_bytes.labels(
+                    mountpoint=partition.mountpoint,
+                    device=device,
+                    fstype=partition.fstype
+                ).set(usage.free)
+                
+                disk_total_bytes.labels(
+                    mountpoint=partition.mountpoint,
+                    device=device,
+                    fstype=partition.fstype
+                ).set(usage.total)
+                
+                disk_used_percent.labels(
+                    mountpoint=partition.mountpoint,
+                    device=device,
+                    fstype=partition.fstype
+                ).set(usage.percent)
+                
+                # Get inode information
+                if hasattr(os, 'statvfs'):
+                    stat = os.statvfs(partition.mountpoint)
+                    disk_inodes_free.labels(
+                        mountpoint=partition.mountpoint,
+                        device=device,
+                        fstype=partition.fstype
+                    ).set(stat.f_favail)
+                    
+                    disk_inodes_total.labels(
+                        mountpoint=partition.mountpoint,
+                        device=device,
+                        fstype=partition.fstype
+                    ).set(stat.f_files)
+                    
+            except PermissionError:
+                continue
+    
+    def collect_metrics():
+        get_disk_stats()
+        get_disk_usage()
+    
+    if __name__ == '__main__':
+        print("Starting Disk I/O Exporter on port 9839")
+        start_http_server(9839)
+        
+        while True:
+            collect_metrics()
+            time.sleep(10)
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: disk-io-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: disk-io-exporter
+  template:
+    metadata:
+      labels:
+        app: disk-io-exporter
+    spec:
+      hostPID: true
+      containers:
+      - name: disk-io-exporter
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          pip install prometheus_client psutil
+          python /scripts/disk_io_exporter.py
+        ports:
+        - containerPort: 9839
+          name: metrics
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: proc
+          mountPath: /proc
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: scripts
+        configMap:
+          name: disk-io-exporter
+          defaultMode: 0755
+      - name: proc
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: disk-io-exporter
+  namespace: monitoring
+  labels:
+    app: disk-io-exporter
+spec:
+  selector:
+    app: disk-io-exporter
+  ports:
+  - name: metrics
+    port: 9839
+    targetPort: 9839
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: disk-io-exporter
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: disk-io-exporter
+  endpoints:
+  - port: metrics
+    interval: 30s

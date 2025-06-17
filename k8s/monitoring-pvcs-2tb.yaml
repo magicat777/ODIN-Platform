@@ -1,0 +1,47 @@
+---
+# Prometheus PVC for 2TB storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-storage-2tb
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: prometheus-pv-2tb
+
+---
+# Grafana PVC for 2TB storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-storage-2tb
+  resources:
+    requests:
+      storage: 20Gi
+  volumeName: grafana-pv-2tb
+
+---
+# Loki PVC for 2TB storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-storage-2tb
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: loki-pv-2tb

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provisioning
+  namespace: monitoring
+data:
+  custom-dashboards.yaml: |
+    apiVersion: 1
+    providers:
+    - name: 'custom-dashboards'
+      orgId: 1
+      folder: 'Custom'
+      type: file
+      disableDeletion: false
+      updateIntervalSeconds: 10
+      allowUiUpdates: true
+      options:
+        path: /var/lib/grafana/dashboards/custom
+        foldersFromFilesStructure: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-dashboard-storage
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-grafana
+  namespace: monitoring
+spec:
+  template:
+    spec:
+      volumes:
+      - name: dashboard-storage
+        persistentVolumeClaim:
+          claimName: grafana-dashboard-storage
+      containers:
+      - name: grafana
+        volumeMounts:
+        - name: dashboard-storage
+          mountPath: /var/lib/grafana/dashboards-persistent

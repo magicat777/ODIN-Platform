@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-custom-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  system-power-temperature.json: |
+$(cat ~/Projects/ODIN/ODIN-Platform/dashboards/system-power-temperature-dashboard.json | sed 's/^/    /')
+  gpu-monitoring.json: |
+$(cat ~/Projects/ODIN/ODIN-Platform/dashboards/gpu-monitoring-dashboard.json | sed 's/^/    /')
+  network-performance.json: |
+$(cat ~/Projects/ODIN/ODIN-Platform/dashboards/network-performance-dashboard.json | sed 's/^/    /')
+  disk-io-performance.json: |
+$(cat ~/Projects/ODIN/ODIN-Platform/dashboards/disk-io-dashboard.json | sed 's/^/    /')
